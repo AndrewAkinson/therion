@@ -1523,6 +1523,36 @@ endsurface|
 \endcomopt
 
 
+\subsubchapter `scan'.
+
+\description
+The |scan| command is used to enter external 3D mesh data into the cave 3D model. This is particularly useful for integrating high-resolution LiDAR scans or photogrammetry models directly with other surveyed data.
+\enddescription
+
+\syntax
+|scan
+   file <filename>
+   units <units>
+   axes <x-spec> <y-spec> <z-spec>
+   [calibration data]
+endscan|
+\endsyntax
+
+\context
+none, survey
+\endcontext
+
+\comopt
+* |file <filename>| = filename in STL format containing 3D mesh data.
+
+* |units <units>| = units of the STL file. Metres by default.
+
+* |axes <x-spec> <y-spec> <z-spec>| = order of axes in the STL file. Axes can be in any order, you can use |x|, |-x|, |y|, |-y|, |z| or |-z|. A minus prefix means the axis is reversed. 
+
+* |[calibration data]| = multiple lines of coordinates mapping known survey stations to the 3D mesh. Each line contains position of specifin survey station in STL file coordinates in |<station-name> <x> <y> <z>| order.
+\endcomopt
+
+
 \subsubchapter `import'.
 
 \description

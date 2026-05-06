@@ -4,6 +4,7 @@ therion:
  * added point borehole
  * support compilation on Android (in termux)
  * add `gps` as alias for `position` team role
+ * added scan command to include STL 3D mesh into cave 3D model
 
 --------------------------------------------------------------------------------
 
