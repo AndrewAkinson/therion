@@ -31,6 +31,7 @@
 #include "thconfig.h"
 #include "thdatabase.h"
 #include "thexception.h"
+#include "thparse.h"
 
 #include <fmt/core.h>
 

@@ -100,7 +100,7 @@ $thtt_enum = "enum {\n$thtt_enum\t$ekey = $thtt_enum_val\n};\n";
 $thtt_encoding = "static const thstok thtt_encoding[] = {\n" .
   "$thtt_encoding_uc\t{\"$ENAME\",\t$ekey},\n" .
   "$thtt_encoding_lc\t{\"$ename\",\t$ekey},\n" .
-  "\t{NULL, TT_UNKNOWN_ENCODING}\n};\n";
+  "\t{nullptr, TT_UNKNOWN_ENCODING}\n};\n";
   
 # now let's generate encoding tables
 print "processing conversion tables: E$maxid, A$maxascii, U$maxunicode ... ";
@@ -161,7 +161,7 @@ print OUTPT <<ENDOUTPT;
 #ifndef thchencdata_cxx
 #define thchencdata_cxx
 
-#include <sys/types.h>
+#include <cstddef>
 
 
 /**
@@ -215,7 +215,7 @@ print OUTPT <<ENDOUTPT;
 #ifndef thchencdata_h
 #define thchencdata_h
 
-#include \"thparse.h\"
+#include \"thstok.h\"
 
 
 /**

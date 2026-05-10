@@ -46,6 +46,7 @@
 #include "thproj.h"
 #include "thtexfonts.h"
 #include "thlang.h"
+#include "thparse.h"
 #include "therion.h"
 
 
@@ -351,9 +352,6 @@ void thexpuni::polygon_close_ring()
 
 void thexpuni::parse_scrap(thscrap * scrap)
 {
-	
-	thbuffer stnbuff;
-
   // export scrap outline
   this->clear();
   thscraplo * lo = scrap->get_outline(), * lo2;

@@ -29,6 +29,7 @@
 #include "thexception.h"
 #include "thsymbolset.h"
 #include "thdatabase.h"
+#include "thparse.h"
 
 #include <fmt/core.h>
 
@@ -176,8 +177,8 @@ void th2dsplitTT(char * src, char ** type, char ** subtype)
   sl = strlen(src);
   sTTtype.guarantee(sl+1);
   sTTsubtype.guarantee(sl+1);
-  t = sTTtype.get_buffer();
-  st = sTTsubtype.get_buffer();
+  t = sTTtype.data();
+  st = sTTsubtype.data();
   t[0] = 0;
   st[0] = 0;
   tl = 0;

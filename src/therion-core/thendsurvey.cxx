@@ -28,6 +28,7 @@
 #include "thendsurvey.h"
 #include "thexception.h"
 #include "thdatabase.h"
+#include "thparse.h"
 
 #include <fmt/core.h>
 

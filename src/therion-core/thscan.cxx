@@ -38,6 +38,7 @@
 #include "thproj.h"
 #include "thtflength.h"
 #include "thtrans.h"
+#include "thparse.h"
 
 #include "stl_reader.h"
 

@@ -1,18 +1,18 @@
 #!/usr/bin/perl
 ## usage:
-## ./process.pl - generate .h sources from texts.txt
-## ./process.pl update - find new strings to translate and load all
+## ./process.pl <out_dir> - generate .h sources from texts.txt
+## ./process.pl update <out_dir> - find new strings to translate and load all
 ##   texts_xy.txt into texts.txt
 ## ./process.pl export[-empty] xy - export texts_xy.txt with texts
 ##   for translation. If export-empty is used, only untranslated strings
 ##   are exported
 
 @trans_sources = (
-  "../thsymbolset.cxx",
-  "../thexpmap.cxx",
-  "../thlocale.cxx",
-  "../thmapstat.cxx",
-  "../thpdf.cxx",
+  "../therion-core/thsymbolset.cxx",
+  "../therion-core/thexpmap.cxx",
+  "../therion-core/thlocale.cxx",
+  "../therion-core/thmapstat.cxx",
+  "../therion-core/thpdf.cxx",
 );
 
 sub read_lang_file {
@@ -113,6 +113,7 @@ sub write_lang_file {
 
 sub write_sources {
   my $href = shift;
+  my $out_dir = shift;
   my %hr = %{$href};
 
   # vytvorime si zoznam jazykov a ich alternativ
@@ -191,7 +192,7 @@ sub write_sources {
   $texttable .= "};\n";
 
   # exportujeme thlangdata.h
-  open(OUT,">../thlangdata.h") || die("error: can't open thlangdata.h for output\n");
+  open(OUT,">$out_dir/thlangdata.h") || die("error: can't open thlangdata.h for output\n");
   print OUT <<ENDOUT;
 /**
  * \@file thlangdata.h
@@ -208,7 +209,7 @@ ENDOUT
   close(OUT);
 
   # exportujeme thlangdatafields.h
-  open(OUT,">../thlangdatafields.h") || die("error: can't open thlangdatafields.h for output\n");
+  open(OUT,">$out_dir/thlangdatafields.h") || die("error: can't open thlangdatafields.h for output\n");
   print OUT <<ENDOUT;
 /**
  * \@file thlangdatafields.h
@@ -365,7 +366,7 @@ if ($ARGV[0] =~ /^update$/i) {
   backup_file("texts.txt");
   $rf = update_todo_list($rf);
   write_lang_file("texts.txt",$rf);
-  write_sources($rf);
+  write_sources($rf,$ARGV[1]);
 } elsif ($ARGV[0] =~ /^export(\-empty)?$/i) {
   my $onlyempty = $1;
   my $lng = check_language($ARGV[1]);
@@ -374,6 +375,6 @@ if ($ARGV[0] =~ /^update$/i) {
   }
   export_language("texts_$lng.txt",$lng,$rf,$onlyempty);
 } else {
-  write_sources($rf);
+  write_sources($rf,$ARGV[0]);
 }
 

@@ -229,8 +229,6 @@ puts $fid {/**
  
 #include "thstok.h"
  
-#include <map>
-
 /**
 * Add default CS transformations.
 */
