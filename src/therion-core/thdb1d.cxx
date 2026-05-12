@@ -481,36 +481,65 @@ void thdb1d::scan_data()
         throw thexception(fmt::format("{} [{}]", lei->srcf.name, lei->srcf.line), e);
       }
 
-      // average consecutive legs between the same pair of stations
-      // (multiple readings of the same shot, as is common practice)
+      // Average consecutive legs between the same pair of stations.
+      // It is common practice to measure the same shot multiple times; these
+      // repeated readings are collapsed into a single averaged leg before being
+      // passed to cavern, so that the shot is only counted once in the traverse.
+      //
+      // Two consecutive legs are considered the same shot if they connect the
+      // same pair of stations — either in the same order (4->5 followed by 4->5)
+      // or in reversed order (4->5 followed by 5->4, or 5->4 followed by 4->5).
+      // Blank lines, comments, and unrelated legs break the consecutive run.
+      // This matches the behaviour of survex (addlegbyname in netbits.c).
       {
         thdataleg_list::iterator prev_lei = dp->leg_list.end();
         int avg_count = 0;
         for (lei = dp->leg_list.begin(); lei != dp->leg_list.end(); lei++) {
           if (!lei->is_valid)
             continue;
-          if (avg_count > 0
+
+          // Stations in the same order as the accumulated leg.
+          bool same_order = (avg_count > 0
               && prev_lei != dp->leg_list.end()
               && lei->from.id == prev_lei->from.id
               && lei->to.id == prev_lei->to.id
               && lei->data_type == prev_lei->data_type
-              && lei->flags == prev_lei->flags) {
-            // merge this leg into prev_lei using running arithmetic mean
-            // of the Cartesian vectors (same approach as survex)
-            prev_lei->total_dx = (prev_lei->total_dx * avg_count + lei->total_dx) / (avg_count + 1);
-            prev_lei->total_dy = (prev_lei->total_dy * avg_count + lei->total_dy) / (avg_count + 1);
-            prev_lei->total_dz = (prev_lei->total_dz * avg_count + lei->total_dz) / (avg_count + 1);
+              && lei->flags == prev_lei->flags);
+
+          // Stations in the reversed order relative to the accumulated leg.
+          // The total_dx/dy/dz of this leg point in the opposite direction,
+          // so they must be negated before averaging.
+          bool is_reversed_leg = (!same_order
+              && avg_count > 0
+              && prev_lei != dp->leg_list.end()
+              && lei->from.id == prev_lei->to.id
+              && lei->to.id == prev_lei->from.id
+              && lei->data_type == prev_lei->data_type
+              && lei->flags == prev_lei->flags);
+
+          if (same_order || is_reversed_leg) {
+            // For a reversed leg, negate the incoming Cartesian vector so it
+            // points in the same canonical direction as prev_lei before averaging.
+            double merge_dx = is_reversed_leg ? -lei->total_dx : lei->total_dx;
+            double merge_dy = is_reversed_leg ? -lei->total_dy : lei->total_dy;
+            double merge_dz = is_reversed_leg ? -lei->total_dz : lei->total_dz;
+
+            // Merge using running arithmetic mean of Cartesian vectors
+            // (same approach as survex addlegbyname in netbits.c).
+            prev_lei->total_dx = (prev_lei->total_dx * avg_count + merge_dx) / (avg_count + 1);
+            prev_lei->total_dy = (prev_lei->total_dy * avg_count + merge_dy) / (avg_count + 1);
+            prev_lei->total_dz = (prev_lei->total_dz * avg_count + merge_dz) / (avg_count + 1);
 
             prev_lei->adj_dx = prev_lei->total_dx;
             prev_lei->adj_dy = prev_lei->total_dy;
             prev_lei->adj_dz = prev_lei->total_dz;
 
-            // recompute polar values from the averaged Cartesian
+            // Recompute polar values from the averaged Cartesian vector.
             prev_lei->total_length = thdxyz2length(prev_lei->total_dx, prev_lei->total_dy, prev_lei->total_dz);
             prev_lei->total_bearing = thdxyz2bearing(prev_lei->total_dx, prev_lei->total_dy, prev_lei->total_dz);
             prev_lei->total_gradient = thdxyz2clino(prev_lei->total_dx, prev_lei->total_dy, prev_lei->total_dz);
 
-            // update raw polar values so write_survey_leg() exports the averaged shot
+            // Update raw polar values so write_survey_leg() exports the averaged shot.
             prev_lei->length = (prev_lei->length * avg_count + lei->length) / (avg_count + 1);
             if (prev_lei->direction) {
               prev_lei->bearing = prev_lei->total_bearing;
@@ -526,6 +555,8 @@ void thdb1d::scan_data()
 
             lei->is_valid = false;
             avg_count++;
+            // prev_lei is intentionally NOT updated — subsequent legs
+            // (same order or reversed) continue to merge into the first leg.
           } else {
             prev_lei = lei;
             avg_count = 1;
