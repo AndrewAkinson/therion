@@ -5,6 +5,7 @@ endif()
 include(Catch2)
 
 add_executable(utest 
+    utest-image.cxx
     utest-main.cxx
     utest-proj.cxx
     utest-str.cxx
@@ -18,6 +19,7 @@ add_executable(utest
     utest-thobjectid.cxx
     utest-thobjectsrc.cxx
     utest-thscrapen.cxx
+    utest-thsvxctrl.cxx
     utest-thscraplo.cxx
 )
 target_link_libraries(utest PUBLIC therion-core catch2-interface)

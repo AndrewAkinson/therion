@@ -41,6 +41,8 @@
 #include "thparse.h"
 #include "therion.h"
 
+#include <fmt/format.h>
+
 thexpdb::thexpdb() {
   this->format = TT_EXPDB_FMT_UNKNOWN;
   this->encoding = TT_UNKNOWN_ENCODING;
@@ -124,10 +126,8 @@ double sql_double(double x) {
 
 void thexpdb::export_sql_file(class thdatabase * dbp)
 {
-  
-  int enc = this->encoding;
-  if (enc == TT_UNKNOWN_ENCODING)
-    enc = thini.get_encoding(THINIT_ENCODING_SQL);
+  const int enc = (this->encoding != TT_UNKNOWN_ENCODING) ? this->encoding
+                                                          : thini.get_encoding(THINIT_ENCODING_SQL);
 
   const char * fnm = this->get_output("cave.sql");  
   
@@ -144,7 +144,7 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
   FILE * sqlf;
   sqlf = fopen(fnm,"wb");
   if (sqlf == NULL) {
-    thwarning(fmt::format("can't open {} for output",fnm))
+    thwarning(fmt::format("can't open {} for output",fnm));
     return;
   }
   this->register_output(fnm);
@@ -161,7 +161,6 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
   thdata * dp;
   thmap * mapp;
   thscrap * scrapp;
-  int pass;
   double adx, ady, adz;
   unsigned survey_name = 1, survey_full_name = 1, centreline_title = 1,
     survey_title = 1, person_name = 1, person_surname = 1, // station_type = 4,
@@ -169,37 +168,41 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
 
 
   // survey
-#define IF_PRINTING if (pass == 1) 
-#define ENCODESTR(str) {\
-          if (str != NULL)  \
-            thdecode(&(dbp->buff_enc),enc,str); \
-          else \
-            dbp->buff_enc = ""; \
-          thdecode_sql(&(dbp->buff_tmp),dbp->buff_enc.c_str());}
-#define ESTR (dbp->buff_tmp.c_str())
+  const auto encodestr = [enc, dbp](const char* str) {
+    if (str)
+      thdecode(&(dbp->buff_enc),enc,str);
+    else
+      dbp->buff_enc = "";
+    return thdecode_sql(dbp->buff_enc);
+  };
 
-#define CHECK_STRLEN(var,str) {if (strlen(str) > var) var = strlen(str);}
-#define INSERTPERSON \
-            personmapit = personmap.find(*ti); \
-            if (personmapit == personmap.end()) { \
-              personmap[*ti] = ++personx; \
-              ENCODESTR(ti->get_n1()); \
-              IF_PRINTING fprintf(sqlf,"insert into PERSON values (%ld, %s, ", \
-                personx, ESTR); \
-              else CHECK_STRLEN(person_name,ESTR); \
-              ENCODESTR(ti->get_n2()); \
-              IF_PRINTING fprintf(sqlf,"%s);\n", ESTR); \
-              else CHECK_STRLEN(person_surname, ESTR); \
-              personmapit = personmap.find(*ti); \
-            } 
+  const auto check_strlen = [](unsigned int& var, std::string_view str) {
+    if (str.length() > var)
+      var = str.length();
+  };
 
+  const auto insert_person = [&](const thperson& person, const bool printing) {
+    personmapit = personmap.find(person);
+    if (personmapit == personmap.end()) {
+      personmap[person] = ++personx;
+      auto str = encodestr(person.get_n1());
+      if (printing) fprintf(sqlf,"insert into PERSON values (%ld, %s, ",
+        personx, str.c_str());
+      else check_strlen(person_name, str);
+      str = encodestr(person.get_n2());
+      if (printing) fprintf(sqlf,"%s);\n", str.c_str());
+      else check_strlen(person_surname, str);
+      personmapit = personmap.find(person);
+    } 
+  };
 
-  for (pass = 0; pass < 2; pass++) {
+  for (int pass = 0; pass < 2; pass++) {
+    const bool printing = pass == 1;
     oi = dbp->object_list.begin();
     personx = 0;    
     personmap.clear();
     shotx = 0;
-    IF_PRINTING {
+    if (printing) {
 //      fprintf(sqlf,"begin transaction;\ncreate table SURVEY "
       fprintf(sqlf,"create table SURVEY "
         "(ID integer, PARENT_ID integer, NAME varchar(%d), "
@@ -258,42 +261,45 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
       switch ((*oi)->get_class_id()) {
 
         case TT_SURVEY_CMD:
+        {
           sp = dynamic_cast<thsurvey*>(oi->get());
-          ENCODESTR(sp->title);
-          IF_PRINTING {
+          const auto str = encodestr(sp->title);
+          if (printing) {
             fprintf(sqlf,"insert into SURVEY values "
               "(%ld, %ld, '%s', '%s', %s);\n ",
               sp->id, (sp->fsptr != NULL ? sp->fsptr->id : 0), 
-              sp->name, sp->full_name, ESTR
+              sp->name, sp->full_name, str.c_str()
               );
           } else {
-            CHECK_STRLEN(survey_name,sp->name);
-            CHECK_STRLEN(survey_full_name,sp->full_name);
-            CHECK_STRLEN(survey_title,ESTR);
+            check_strlen(survey_name,sp->name);
+            check_strlen(survey_full_name,sp->full_name);
+            check_strlen(survey_title, str);
           }
           break;  // SURVEY
+        }
 
 		case TT_SCRAP_CMD:
 			scrapp = dynamic_cast<thscrap*>(oi->get());
-			IF_PRINTING {
+			if (printing) {
 				fprintf(sqlf,"insert into SCRAPS values "
 				  "(%ld, %ld, '%s', %d, %.5lf, %.5lf);\n ",
 				  scrapp->id, (scrapp->fsptr != NULL ? scrapp->fsptr->id : 0), 
 				  scrapp->name, scrapp->proj->id, sql_double(scrapp->maxdist), sql_double(scrapp->avdist));
 			} else {
-				CHECK_STRLEN(survey_name,scrapp->name);
+				check_strlen(survey_name,scrapp->name);
 			}
 			break;
 
 		case TT_MAP_CMD:
+    {
 			mapp = dynamic_cast<thmap*>(oi->get());
 			mapp->stat.scanmap(mapp);
-			ENCODESTR(mapp->title);
-			IF_PRINTING {
+			const auto str = encodestr(mapp->title);
+			if (printing) {
 				fprintf(sqlf,"insert into MAPS values "
 				  "(%ld, %ld, '%s', %s, %d, %.3lf, %.3lf);\n ",
 				  mapp->id, (mapp->fsptr != NULL ? mapp->fsptr->id : 0), 
-				  mapp->name, ESTR, mapp->projection_id, sql_double(mapp->stat.get_length()), sql_double(mapp->stat.get_depth())
+				  mapp->name, str.c_str(), mapp->projection_id, sql_double(mapp->stat.get_length()), sql_double(mapp->stat.get_depth())
 				  );
 				thdb2dmi * cit = mapp->first_item;
 				while (cit != NULL) {
@@ -303,37 +309,39 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
 					cit = cit->next_item;
 				}
 			} else {
-				CHECK_STRLEN(survey_name,mapp->name);
-				CHECK_STRLEN(survey_title,ESTR);
+				check_strlen(survey_name,mapp->name);
+				check_strlen(survey_title, str);
 			}
 			break;
+    }
           
         case TT_DATA_CMD:
+        {
           dp = dynamic_cast<thdata*>(oi->get());
-          ENCODESTR(dp->title);
-          IF_PRINTING {
+          const auto str = encodestr(dp->title);
+          if (printing) {
             fprintf(sqlf,"insert into CENTRELINE values "
                          "(%ld, %ld, %s, ", dp->id, dp->fsptr->id, 
-                         ESTR);
+                         str.c_str());
             fprintf(sqlf,"%s, ", dp->date.get_str(TT_DATE_FMT_SQL_SINGLE));
             fprintf(sqlf,"%s, ", dp->discovery_date.get_str(TT_DATE_FMT_SQL_SINGLE));
             fprintf(sqlf,"%.2f, %.2f, %.2f);\n ", dp->stat_length, 
               dp->stat_slength, dp->stat_dlength);
           } else {
-            CHECK_STRLEN(centreline_title,ESTR);
+            check_strlen(centreline_title, str);
           }
           
           for(ti = dp->team_set.begin(); ti != dp->team_set.end(); ti++) {
-            INSERTPERSON;
-            IF_PRINTING {
+            insert_person(*ti, printing);
+            if (printing) {
               fprintf(sqlf,"insert into TOPO values (%ld, %ld);\n ",
                 personmapit->second, dp->id);
             }
           }
           
           for(ti = dp->discovery_team_set.begin(); ti != dp->discovery_team_set.end(); ti++) {
-            INSERTPERSON;
-            IF_PRINTING {
+            insert_person(*ti, printing);
+            if (printing) {
               fprintf(sqlf,"insert into EXPLO values (%ld, %ld);\n ",
                 personmapit->second, dp->id);
             }
@@ -341,7 +349,7 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
 
           for(lei = dp->leg_list.begin(); lei != dp->leg_list.end(); lei++) {
             if (lei->is_valid) {
-              IF_PRINTING {
+              if (printing) {
                 st = &(dbp->db1d.station_vec[lei->from.id - 1]);
                 st2 = &(dbp->db1d.station_vec[lei->to.id - 1]);
                 adx = st2->x - st->x;
@@ -351,9 +359,9 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
                   "%ld, %ld, %ld, %ld, %.3f, %.2f, %.2f, %.3f, %.2f, %.2f, %.3f, %.2f, %.2f);\n",
                   ++shotx, lei->from.id, lei->to.id, dp->id,
                   sql_double(lei->total_length), sql_double(lei->total_bearing), sql_double(lei->total_gradient),
-				  sql_double(thdxyz2length(adx, ady, adz)), sql_double(thdxyz2bearing(adx, ady, adz)), sql_double(thdxyz2clino(adx, ady, adz)),
+				  sql_double(thdxyz2length(adx, ady, adz)), sql_double(thdxyz2bearing(adx, ady)), sql_double(thdxyz2clino(adx, ady, adz)),
 				  sql_double(thdxyz2length(adx - lei->total_dx, ady - lei->total_dy, adz - lei->total_dz)),
-				  sql_double(thdxyz2bearing(adx - lei->total_dx, ady - lei->total_dy, adz - lei->total_dz)),
+				  sql_double(thdxyz2bearing(adx - lei->total_dx, ady - lei->total_dy)),
 				  sql_double(thdxyz2clino(adx - lei->total_dx, ady - lei->total_dy, adz - lei->total_dz))
                   );
                 if ((lei->flags & TT_LEGFLAG_SURFACE) != TT_LEGFLAG_NONE)
@@ -364,11 +372,14 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
                   fprintf(sqlf,"insert into SHOT_FLAG values(%ld, 'apx');\n", shotx);
                 if ((lei->flags & TT_LEGFLAG_SPLAY) != TT_LEGFLAG_NONE)
                   fprintf(sqlf,"insert into SHOT_FLAG values(%ld, 'spl');\n", shotx);
+                if ((lei->flags & TT_LEGFLAG_ARTIFICIAL) != TT_LEGFLAG_NONE)
+                  fprintf(sqlf,"insert into SHOT_FLAG values(%ld, 'art');\n", shotx);
               }
             }
           }
 
           break;  // DATA
+        }
           
       }
       oi++;
@@ -378,11 +389,11 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
     for(i = 0; i < ni; i++) {
       st = &(dbp->db1d.station_vec[i]);
       
-      ENCODESTR(st->name);
-      IF_PRINTING {
+      const auto str = encodestr(st->name);
+      if (printing) {
         fprintf(sqlf,"insert into STATION values "
           "(%ld, %s, %ld, %.2f, %.2f, %.2f);\n",
-          (i+1), ESTR, st->survey->id,           
+          (i+1), str.c_str(), st->survey->id,           
 		  sql_double(st->x), sql_double(st->y), sql_double(st->z));
         if ((st->flags & TT_STATIONFLAG_ENTRANCE) != TT_STATIONFLAG_NONE)
           fprintf(sqlf,"insert into STATION_FLAG values(%ld, 'ent');\n", (i+1));
@@ -405,19 +416,8 @@ void thexpdb::export_sql_file(class thdatabase * dbp)
         if ((st->flags & TT_STATIONFLAG_ARCH) != TT_STATIONFLAG_NONE)
           fprintf(sqlf,"insert into STATION_FLAG values(%ld, 'arc');\n", (i+1));
       } else {
-            CHECK_STRLEN(station_name,ESTR);
+            check_strlen(station_name, str);
       }
-      
-      //ENCODESTR(st->comment);
-      //tmpstr = thmatch_string(st->mark,thtt_datamark);
-      //IF_PRINTING {
-      //  fprintf(sqlf,"'%s', %s);\n",
-      //    tmpstr, ESTR);
-      //} else {
-      //      CHECK_STRLEN(station_type,tmpstr);
-      //      CHECK_STRLEN(station_comment,ESTR);
-      //}
-      
     }
 
     
@@ -447,7 +447,7 @@ void thexpdb::export_csv_file(class thdatabase * dbp) {
   FILE * out;
   out = fopen(fnm, "wb");
   if (out == NULL) {
-    thwarning(fmt::format("can't open {} for output", fnm))
+    thwarning(fmt::format("can't open {} for output", fnm));
     return;
   }
   this->register_output(fnm);

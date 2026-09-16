@@ -36,6 +36,7 @@
 #include <wx/glcanvas.h>
 #include <wx/timer.h>
 #include <wx/image.h>
+#include <wx/xml/xml.h>
 
 enum {
   LXGLCML_NONE,
@@ -43,6 +44,8 @@ enum {
   LXGLCML_ZOOM,
   LXGLCML_ROTATE,
   LXGLCML_TILT,
+  LXGLCML_WALK,
+  LXGLCML_LOOK,
   LXGLCML_PANX,
   LXGLCML_PANY,
   LXGLCML_PANX2Y,
@@ -83,6 +86,7 @@ class lxGLCanvas: public wxGLCanvas {
     double m_indRes = 0.0, m_indLWidth = 0.0;
     bool m_sInit, m_sInitReset;
     bool m_sMoveSingle = false, m_isO;
+    bool m_sTransparencySorting = true;
 
     // fonty
     FT_Face m_ftFace1 = {}, m_ftFace2 = {}, m_ftFace3 = {};
@@ -95,10 +99,18 @@ class lxGLCanvas: public wxGLCanvas {
     GLdouble m_camera_projection[16] = {};
     GLint m_camera_viewport[4] = {};
 
-		bool m_sCameraAutoRotate, m_sCameraLockRotation;
+		bool m_sCameraAutoRotate, m_sCameraLockRotation, m_sCameraWalkMode;
     wxStopWatch m_sCameraAutoRotateSWatch;
     long m_sCameraAutoRotateCounter = 0;
     double m_sCameraAutoRotateAngle, m_sCameraStartAutoRotateAngle = 0.0;
+    bool m_sCameraPresentationAnimate = false;
+    wxStopWatch m_sCameraPresentationSWatch;
+    long m_sCameraPresentationCounter = 0;
+    long m_sCameraPresentationFrom = 0;
+    long m_sCameraPresentationTo = 1;
+    long m_sCameraPresentationStartTime = 0;
+    long m_sCameraPresentationAppliedScene = -1;
+    double m_sCameraPresentationStartDir = 0.0;
 
     void OnPaint(wxPaintEvent& event);
     void OnSize(wxSizeEvent& event);
@@ -113,6 +125,22 @@ class lxGLCanvas: public wxGLCanvas {
     void OnKeyPress(wxKeyEvent& event);
     void OnIdle(wxIdleEvent& event);
 		bool CameraAutoRotate();
+    bool StartCameraPresentationAnimation();
+    void StopCameraPresentationAnimation();
+    bool CameraPresentationAnimate();
+    bool CameraPresentationRotate();
+    long GetPresentationSceneCount();
+    wxXmlNode * GetPresentationScene(long index);
+    bool GetPresentationLoopAnimation();
+    bool GetPresentationSceneChanges();
+    void ApplyPresentationScene(long index);
+    void SelectPresentationScene(long index);
+    double GetPresentationSceneDuration(wxXmlNode * n);
+    long GetPresentationSceneRotations(wxXmlNode * n);
+    double GetPresentationSceneRotationDuration(wxXmlNode * n);
+    bool GetPresentationSceneWalkerMode(wxXmlNode * n);
+    bool GetPresentationSceneTransitionView(wxXmlNode * n);
+    void SetPresentationWalkerMode(wxXmlNode * n);
      
     void InitializeS();
     void ForceRefresh(bool updateTB = true);

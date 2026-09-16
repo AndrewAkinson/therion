@@ -38,6 +38,8 @@
 #include "therion.h"
 #include "icase.h"
 
+#include <fmt/format.h>
+
 thdata::thdata()
 {
   this->team_set.clear();
@@ -1762,9 +1764,9 @@ void thdata::insert_data_leg(int nargs, char ** args)
         break;
         
       case TT_DATALEG_DIRECTION:
-        if (icase_equals(args[carg],"b"))
+        if (icase_equal{}(args[carg], "b"))
           this->cd_leg->direction = false;
-        else if (!icase_equals(args[carg], "f"))
+        else if (!icase_equal{}(args[carg], "f"))
           throw thexception(fmt::format("invalid survey direction -- {}", args[carg]));
         break;
         
@@ -2563,6 +2565,13 @@ void thdata::set_data_flags(int nargs, char ** args)
           this->d_flags &= ~TT_LEGFLAG_DUPLICATE;
         else
           this->d_flags |= TT_LEGFLAG_DUPLICATE;
+        notb = false;
+        break;
+      case TT_DATALFLAG_ARTIFICIAL:
+        if (notb)
+          this->d_flags &= ~TT_LEGFLAG_ARTIFICIAL;
+        else
+          this->d_flags |= TT_LEGFLAG_ARTIFICIAL;
         notb = false;
         break;
       default:

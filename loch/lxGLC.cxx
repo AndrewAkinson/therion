@@ -38,6 +38,7 @@
 #include "lxData.h"
 #include "lxSetup.h"
 #include "lxSView.h"
+#include "lxPres.h"
 #include "lxFNT6x13_bdf.h"
 #include "lxFNT10x20_bdf.h"
 #include "lxFNTFreeSans_ttf.h"
@@ -82,7 +83,7 @@ END_EVENT_TABLE()
 int wx_gl_window_attribs[] = {
 	WX_GL_RGBA,
 	WX_GL_DOUBLEBUFFER,
-	WX_GL_DEPTH_SIZE, 16,
+	WX_GL_DEPTH_SIZE, 24,
 	0 };
 
 
@@ -135,6 +136,7 @@ lxGLCanvas::lxGLCanvas(struct lxSetup * stp, struct lxData * dat,
 
   this->m_sCameraAutoRotate = false;
   this->m_sCameraLockRotation = false;
+  this->m_sCameraWalkMode = false;
   this->m_sCameraAutoRotateAngle = 1.0;
 
   this->m_maxTSizeO = 0;
@@ -376,6 +378,14 @@ void lxGLCanvas::OnMouseUp(wxMouseEvent& event)
       if (event.MiddleUp() || (event.LeftUp() && this->m_sMoveSingle))
         this->m_sMoveLock = LXGLCML_NONE;
       break;
+    case LXGLCML_WALK:
+      if (event.MiddleUp())
+        this->m_sMoveLock = LXGLCML_NONE;
+      break;
+    case LXGLCML_LOOK:
+      if (event.LeftUp())
+        this->m_sMoveLock = LXGLCML_NONE;
+      break;
   }
   if ((this->m_sMoveLock == LXGLCML_NONE) && (this->HasCapture())) {
     this->ReleaseMouse();
@@ -465,6 +475,336 @@ bool lxGLCanvas::CameraAutoRotate() {
     return false;
 }
 
+long lxGLCanvas::GetPresentationSceneCount() {
+  wxXmlNode * r = this->frame->m_pres->GetRoot();
+  wxXmlNode * n;
+  long count = 0;
+
+  if (r == NULL)
+    return 0;
+
+  n = r->GetChildren();
+  while (n != NULL) {
+    if (n->GetName() == _T("Scene"))
+      count++;
+    n = n->GetNext();
+  }
+
+  return count;
+}
+
+wxXmlNode * lxGLCanvas::GetPresentationScene(long index) {
+  wxXmlNode * r = this->frame->m_pres->GetRoot();
+  wxXmlNode * n;
+  long c = 0;
+
+  if (r == NULL)
+    return NULL;
+
+  n = r->GetChildren();
+  while (n != NULL) {
+    if (n->GetName() == _T("Scene")) {
+      if (index == c)
+        return n;
+      c++;
+    }
+    n = n->GetNext();
+  }
+
+  return NULL;
+}
+
+bool lxGLCanvas::GetPresentationLoopAnimation() {
+  wxXmlNode * r = this->frame->m_pres->GetRoot();
+  wxString value;
+
+  if (r == NULL)
+    return true;
+
+  value = r->GetAttribute(_T("loop-animation"), _T("true"));
+  return (value != _T("false")) && (value != _T("0"));
+}
+
+bool lxGLCanvas::GetPresentationSceneChanges() {
+  wxXmlNode * r = this->frame->m_pres->GetRoot();
+  wxString value;
+
+  if (r == NULL)
+    return false;
+
+  value = r->GetAttribute(_T("scene-changes"), _T("false"));
+  return (value == _T("true")) || (value == _T("1"));
+}
+
+void lxGLCanvas::ApplyPresentationScene(long index) {
+  if (!this->GetPresentationSceneChanges() || (index == this->m_sCameraPresentationAppliedScene))
+    return;
+
+  wxXmlNode * scene = this->GetPresentationScene(index);
+  if (scene == NULL)
+    return;
+
+  this->setup->LoadSceneFromXMLNode(scene);
+  this->m_sCameraPresentationAppliedScene = index;
+  this->UpdateRenderContents();
+  this->UpdateRenderList();
+}
+
+void lxGLCanvas::SelectPresentationScene(long index) {
+  if ((this->frame == NULL) || (this->frame->m_presentationDlg == NULL))
+    return;
+
+  this->frame->m_presentationDlg->SelectScene(index);
+}
+
+double lxGLCanvas::GetPresentationSceneDuration(wxXmlNode * n) {
+  wxString duration;
+  double seconds;
+
+  if (n != NULL)
+    duration = n->GetAttribute(_T("duration"), wxEmptyString);
+
+  if (duration.empty() || !duration.ToDouble(&seconds) || (seconds <= 0.0))
+    seconds = 3.0;
+
+  return seconds;
+}
+
+long lxGLCanvas::GetPresentationSceneRotations(wxXmlNode * n) {
+  wxString rotations;
+  long value;
+
+  if (n != NULL)
+    rotations = n->GetAttribute(_T("rotations"), wxEmptyString);
+
+  if (rotations.empty() || !rotations.ToLong(&value))
+    value = 0;
+
+  return value;
+}
+
+double lxGLCanvas::GetPresentationSceneRotationDuration(wxXmlNode * n) {
+  wxString duration;
+  double seconds;
+
+  if (n != NULL)
+    duration = n->GetAttribute(_T("rotation-duration"), wxEmptyString);
+
+  if (duration.empty() || !duration.ToDouble(&seconds) || (seconds <= 0.0))
+    seconds = 15.0;
+
+  return seconds;
+}
+
+bool lxGLCanvas::GetPresentationSceneWalkerMode(wxXmlNode * n) {
+  wxString value;
+
+  if (n != NULL)
+    value = n->GetAttribute(_T("walker-mode"), _T("false"));
+
+  return (value == _T("true")) || (value == _T("1"));
+}
+
+bool lxGLCanvas::GetPresentationSceneTransitionView(wxXmlNode * n) {
+  wxString value;
+
+  if (n != NULL)
+    value = n->GetAttribute(_T("transition-view"), _T("false"));
+
+  return (value == _T("true")) || (value == _T("1"));
+}
+
+void lxGLCanvas::SetPresentationWalkerMode(wxXmlNode * n) {
+  bool walkerMode = this->GetPresentationSceneWalkerMode(n);
+
+  if (this->m_sCameraWalkMode == walkerMode)
+    return;
+
+  this->m_sCameraWalkMode = walkerMode;
+  if (this->frame != NULL)
+    this->frame->UpdateM2TB();
+}
+
+bool lxGLCanvas::StartCameraPresentationAnimation() {
+  long count, selected = 0;
+
+  this->m_sCameraAutoRotate = false;
+  this->m_sCameraPresentationAnimate = true;
+  this->m_sCameraPresentationCounter = 0;
+  this->m_sCameraPresentationAppliedScene = -1;
+  this->m_sCameraPresentationSWatch.Start();
+  this->m_sCameraPresentationStartTime = 0;
+  count = this->GetPresentationSceneCount();
+  if ((count > 0) && (this->frame != NULL) && (this->frame->m_presentationDlg != NULL))
+    selected = this->frame->m_presentationDlg->GetSelection();
+  if ((selected < 0) || (selected >= count))
+    selected = 0;
+  this->m_sCameraPresentationFrom = selected;
+  this->m_sCameraPresentationTo = (selected + 1) % (count > 0 ? count : 1);
+  if (count > 0) {
+    this->SelectPresentationScene(selected);
+    wxXmlNode * scene = this->GetPresentationScene(selected);
+    this->setup->LoadFromXMLNode(scene);
+    this->SetPresentationWalkerMode(scene);
+    this->ApplyPresentationScene(selected);
+  }
+  if ((count > 1) && !this->GetPresentationLoopAnimation() && (selected == count - 1)) {
+    this->StopCameraPresentationAnimation();
+    this->ForceRefresh();
+    return false;
+  }
+  this->setup->StartCameraMovement();
+  this->m_sCameraPresentationStartDir = this->setup->cam_dir;
+  this->ForceRefresh();
+  return true;
+}
+
+void lxGLCanvas::StopCameraPresentationAnimation() {
+  this->m_sCameraPresentationAnimate = false;
+  if (this->frame != NULL)
+    this->frame->UpdateM2TB();
+}
+
+bool lxGLCanvas::CameraPresentationAnimate() {
+  long count, now, elapsed, rotationDuration, transitionDuration, stepDuration;
+  long rotations;
+  wxXmlNode * from, * to;
+  double t;
+  int guard = 0;
+  bool loopAnimation;
+
+  if (!this->m_sCameraPresentationAnimate)
+    return false;
+
+  count = this->GetPresentationSceneCount();
+  if (count < 2)
+    return this->CameraPresentationRotate();
+
+  loopAnimation = this->GetPresentationLoopAnimation();
+  this->m_sCameraPresentationFrom %= count;
+  this->m_sCameraPresentationTo %= count;
+  now = this->m_sCameraPresentationSWatch.Time();
+
+  while (guard < count + 1) {
+    from = this->GetPresentationScene(this->m_sCameraPresentationFrom);
+    to = this->GetPresentationScene(this->m_sCameraPresentationTo);
+    rotations = this->GetPresentationSceneRotations(from);
+    rotationDuration = long(fabs(double(rotations)) * this->GetPresentationSceneRotationDuration(from) * 1000.0);
+    transitionDuration = long(this->GetPresentationSceneDuration(to) * 1000.0);
+    if (transitionDuration < 1)
+      transitionDuration = 1;
+    stepDuration = rotationDuration + transitionDuration;
+    elapsed = now - this->m_sCameraPresentationStartTime;
+    if (elapsed < stepDuration)
+      break;
+    this->setup->LoadFromXMLNode(to);
+    this->SetPresentationWalkerMode(to);
+    this->ApplyPresentationScene(this->m_sCameraPresentationTo);
+    this->SelectPresentationScene(this->m_sCameraPresentationTo);
+    if (!loopAnimation && (this->m_sCameraPresentationTo == count - 1)) {
+      this->StopCameraPresentationAnimation();
+      this->ForceRefresh();
+      return false;
+    }
+    this->m_sCameraPresentationFrom = this->m_sCameraPresentationTo;
+    this->m_sCameraPresentationTo = this->m_sCameraPresentationTo + 1;
+    if (this->m_sCameraPresentationTo >= count)
+      this->m_sCameraPresentationTo = 0;
+    this->m_sCameraPresentationStartTime += stepDuration;
+    guard++;
+  }
+
+  from = this->GetPresentationScene(this->m_sCameraPresentationFrom);
+  to = this->GetPresentationScene(this->m_sCameraPresentationTo);
+  if ((from == NULL) || (to == NULL)) {
+    this->StopCameraPresentationAnimation();
+    return false;
+  }
+
+  rotations = this->GetPresentationSceneRotations(from);
+  rotationDuration = long(fabs(double(rotations)) * this->GetPresentationSceneRotationDuration(from) * 1000.0);
+  transitionDuration = long(this->GetPresentationSceneDuration(to) * 1000.0);
+  if (transitionDuration < 1)
+    transitionDuration = 1;
+  elapsed = now - this->m_sCameraPresentationStartTime;
+  if (elapsed < 0)
+    elapsed = 0;
+  if (elapsed < rotationDuration) {
+    this->setup->LoadFromXMLNode(from);
+    this->SetPresentationWalkerMode(from);
+    this->ApplyPresentationScene(this->m_sCameraPresentationFrom);
+    t = rotationDuration == 0 ? 1.0 : double(elapsed) / double(rotationDuration);
+    if (t > 1.0)
+      t = 1.0;
+    t = t * t * (3.0 - 2.0 * t);
+    this->setup->cam_dir += 360.0 * double(rotations) * t;
+    while (this->setup->cam_dir >= 360.0)
+      this->setup->cam_dir -= 360.0;
+    this->setup->UpdatePos();
+  } else {
+    this->SetPresentationWalkerMode(to);
+    this->ApplyPresentationScene(this->m_sCameraPresentationFrom);
+    t = double(elapsed - rotationDuration) / double(transitionDuration);
+    if (t > 1.0)
+      t = 1.0;
+    t = lxSetup::AnimationTransitionProgress(
+      t,
+      this->GetPresentationSceneTransitionView(from),
+      this->GetPresentationSceneTransitionView(to));
+    this->setup->LoadFromXMLNode(from, to, t, this->GetPresentationSceneWalkerMode(to));
+  }
+
+  auto start = this->m_sCameraPresentationSWatch.Time();
+  this->ForceRefresh();
+  auto render_elapsed = this->m_sCameraPresentationSWatch.Time() - start;
+  if (render_elapsed < 10) wxMilliSleep(10 - render_elapsed);
+  this->m_sCameraPresentationCounter++;
+  return true;
+}
+
+bool lxGLCanvas::CameraPresentationRotate() {
+  long now, elapsed;
+  double t;
+  bool loopAnimation;
+
+  if (!this->m_sCameraPresentationAnimate)
+    return false;
+
+  this->ApplyPresentationScene(0);
+  loopAnimation = this->GetPresentationLoopAnimation();
+  now = this->m_sCameraPresentationSWatch.Time();
+  elapsed = now - this->m_sCameraPresentationStartTime;
+  if (!loopAnimation && (elapsed >= 15000)) {
+    this->setup->cam_dir = this->m_sCameraPresentationStartDir + 360.0;
+    while (this->setup->cam_dir >= 360.0)
+      this->setup->cam_dir -= 360.0;
+    this->setup->UpdatePos();
+    this->StopCameraPresentationAnimation();
+    this->ForceRefresh();
+    return false;
+  }
+  while (elapsed >= 15000) {
+    this->m_sCameraPresentationStartTime += 15000;
+    elapsed -= 15000;
+    this->m_sCameraPresentationStartDir += 360.0;
+  }
+
+  if (elapsed < 0)
+    elapsed = 0;
+  t = double(elapsed) / 15000.0;
+  this->setup->cam_dir = this->m_sCameraPresentationStartDir + 360.0 * t;
+  while (this->setup->cam_dir >= 360.0)
+    this->setup->cam_dir -= 360.0;
+  this->setup->UpdatePos();
+
+  auto start = this->m_sCameraPresentationSWatch.Time();
+  this->ForceRefresh();
+  auto render_elapsed = this->m_sCameraPresentationSWatch.Time() - start;
+  if (render_elapsed < 10) wxMilliSleep(10 - render_elapsed);
+  this->m_sCameraPresentationCounter++;
+  return true;
+}
+
 
 void lxGLCanvas::OnIdle(wxIdleEvent& event)	{
 
@@ -483,7 +823,7 @@ void lxGLCanvas::OnIdle(wxIdleEvent& event)	{
     case LXGLCML_PANY:
       break;		
     default:
-      if (this->CameraAutoRotate())
+      if (this->CameraAutoRotate() || this->CameraPresentationAnimate())
     	  event.RequestMore();
       break;
   }
@@ -535,10 +875,14 @@ void lxGLCanvas::OnMouseDown(wxMouseEvent& event)
       } else if (event.LeftDown() && event.ControlDown()) {
         this->m_sMoveLock = LXGLCML_TILT;
         this->m_sMoveSingle = true;
+      } else if (event.LeftDown() && this->m_sCameraWalkMode) {
+        this->m_sMoveLock = LXGLCML_LOOK;
       } else if (event.LeftDown()) {
         this->m_sMoveLock = LXGLCML_ZOOM2ROTATE;
       } else if (event.RightDown()) {
         this->m_sMoveLock = LXGLCML_PANX2Y;
+      } else if (event.MiddleDown() && this->m_sCameraWalkMode) {
+        this->m_sMoveLock = LXGLCML_WALK;
       } else if (event.MiddleDown()) {
         this->m_sMoveLock = LXGLCML_TILT;
       }
@@ -558,7 +902,11 @@ void lxGLCanvas::OnMouseWheel(wxMouseEvent& event)
 {
   if (this->m_sMoveLock == LXGLCML_NONE) {
     this->setup->StartCameraMovement();
-    this->setup->TiltCamera(-1.0 * double(event.GetWheelRotation()) / double(event.GetWheelDelta()));
+    if (this->m_sCameraWalkMode) {
+      double steps = double(event.GetWheelRotation()) / double(event.GetWheelDelta());
+      this->setup->WalkZoomCamera(pow(1.1, steps));
+    } else
+      this->setup->TiltCamera(-1.0 * double(event.GetWheelRotation()) / double(event.GetWheelDelta()));
     this->ForceRefresh();
   }
 }
@@ -581,7 +929,10 @@ void lxGLCanvas::OnMouseMove(wxMouseEvent& event)
       } else {
         ff = 0.0;
       }
-      this->setup->ZoomCamera(f);
+      if (this->m_sCameraWalkMode)
+        this->setup->WalkCamera(f, ff);
+      else
+        this->setup->ZoomCamera(f);
       if (this->m_sCameraAutoRotate) {
         this->m_sCameraAutoRotateAngle = this->m_sCameraStartAutoRotateAngle + ff / 50.0;
 #ifdef LXWIN32
@@ -589,7 +940,8 @@ void lxGLCanvas::OnMouseMove(wxMouseEvent& event)
           this->ForceRefresh();
 #endif      
       } else {
-        this->setup->RotateCamera(ff);			
+        if (!this->m_sCameraWalkMode)
+          this->setup->RotateCamera(ff);
         this->ForceRefresh();
       }
       break;
@@ -610,7 +962,10 @@ void lxGLCanvas::OnMouseMove(wxMouseEvent& event)
       break;
 
     case LXGLCML_TILT:
-      this->setup->TiltCamera(double(event.GetY() - this->my) / 2.0);
+      if (this->m_sCameraWalkMode)
+        this->setup->WalkTiltCamera(double(event.GetY() - this->my) / 2.0);
+      else
+        this->setup->TiltCamera(double(event.GetY() - this->my) / 2.0);
       if (this->m_sCameraAutoRotate) {
 #ifdef LXWIN32
         if (!this->CameraAutoRotate())
@@ -621,6 +976,21 @@ void lxGLCanvas::OnMouseMove(wxMouseEvent& event)
       } else {
         this->ForceRefresh();
       }
+      break;
+
+    case LXGLCML_WALK:
+      f = pow(1.4142135623730950488016887242097, double(this->my - event.GetY()) / 20.0);
+      this->setup->WalkZoomCamera(f);
+      this->ForceRefresh();
+      break;
+
+    case LXGLCML_LOOK:
+      if (this->m_sCameraLockRotation)
+        ff = 0.0;
+      else
+        ff = double(this->mx - event.GetX()) / 4.0;
+      this->setup->WalkCamera(1.0, ff, double(this->my - event.GetY()) / 4.0);
+      this->ForceRefresh();
       break;
   }
 
@@ -643,6 +1013,8 @@ void lxGLCanvas::OnKeyPress(wxKeyEvent& event) {
       this->setup->StartCameraMovement();
       if (event.ShiftDown())
         this->setup->PanCamera(-0.02, 0.0);
+      else if (this->m_sCameraWalkMode)
+        this->setup->WalkRotateCamera(-1.0);
       else
         this->setup->RotateCamera(-1.0);
       this->ForceRefresh();
@@ -651,7 +1023,9 @@ void lxGLCanvas::OnKeyPress(wxKeyEvent& event) {
       this->setup->StartCameraMovement();
       if (event.ShiftDown())
         this->setup->PanCamera(0.02, 0.0);
-      else 
+      else if (this->m_sCameraWalkMode)
+        this->setup->WalkRotateCamera(1.0);
+      else
         this->setup->RotateCamera(1.0);
       this->ForceRefresh();
       break;
@@ -659,20 +1033,34 @@ void lxGLCanvas::OnKeyPress(wxKeyEvent& event) {
       this->setup->StartCameraMovement();
       if (event.ShiftDown())
         this->setup->PanCamera(0.0, -0.02);
-      else if (event.ControlDown())
-        this->setup->ZoomCamera(1.02);
-      else
-        this->setup->TiltCamera(-1.0);
+      else if (event.ControlDown()) {
+        if (this->m_sCameraWalkMode)
+          this->setup->WalkZoomCamera(1.02);
+        else
+          this->setup->ZoomCamera(1.02);
+      } else {
+        if (this->m_sCameraWalkMode)
+          this->setup->WalkTiltCamera(-1.0);
+        else
+          this->setup->TiltCamera(-1.0);
+      }
       this->ForceRefresh();
       break;
     case WXK_DOWN:
       this->setup->StartCameraMovement();
       if (event.ShiftDown())
         this->setup->PanCamera(0.0, 0.02);
-      else if (event.ControlDown())
-        this->setup->ZoomCamera(0.98);
-      else 
-        this->setup->TiltCamera(1.0);
+      else if (event.ControlDown()) {
+        if (this->m_sCameraWalkMode)
+          this->setup->WalkZoomCamera(0.98);
+        else
+          this->setup->ZoomCamera(0.98);
+      } else {
+        if (this->m_sCameraWalkMode)
+          this->setup->WalkTiltCamera(1.0);
+        else
+          this->setup->TiltCamera(1.0);
+      }
       this->ForceRefresh();
       break;
     default:
@@ -724,6 +1112,8 @@ void lxGLCanvas::SetCamera() {
   maxclip = 1.1 * maxclip;
   if (maxclip < minclip) maxclip = minclip + 1.0;
   if (minclip < (maxclip / 100.0)) minclip = maxclip / 100.0;
+  if (this->m_sCameraWalkMode)
+    minclip = 0.1;
 
   glMatrixMode(GL_PROJECTION);
   glLoadIdentity();
@@ -804,10 +1194,12 @@ void lxGLCanvas::RenderScrapWalls() {
   bool useTransparency;
   useTransparency = false;
   if (this->setup->m_walls_transparency && (clr[3] < 1.0)) {
-    lxVec viewDir;
-    viewDir = this->setup->cam_center - this->setup->cam_pos;
-    viewDir.Normalize();
-    this->data->allWallsSorted->SetVector(viewDir.x, viewDir.y, viewDir.z);
+    if (this->m_sTransparencySorting) {
+      lxVec viewDir;
+      viewDir = this->setup->cam_center - this->setup->cam_pos;
+      viewDir.Normalize();
+      this->data->allWallsSorted->SetVector(viewDir.x, viewDir.y, viewDir.z);
+    }
     glDepthMask(GL_FALSE);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -817,7 +1209,7 @@ void lxGLCanvas::RenderScrapWalls() {
     glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
   }
-  glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_FALSE);
+  glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE);
   glEnable(GL_COLOR_MATERIAL);
   glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat0);
   glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, mat0);
@@ -837,44 +1229,78 @@ void lxGLCanvas::RenderScrapWalls() {
 
   vtkPolyData * pdt;
   if (useTransparency) {
-    pdt = this->data->allWallsSorted->GetOutput();
+    if (this->m_sTransparencySorting) {
+      this->data->allWallsSorted->Update();
+      pdt = this->data->allWallsSorted->GetOutput();
+    } else {
+      pdt = this->data->allWallsTriangle->GetOutput();
+    }
   } else {
     pdt = this->data->allWallsStripped->GetOutput();
   }
   vtkCellArray * tgs = pdt->GetPolys();
   vtkCellArray * tss = pdt->GetStrips();
   vtkDataArray * nms = pdt->GetPointData()->GetNormals();
+  bool altitudeColors = (!this->setup->cam_anaglyph) &&
+    (this->setup->m_colormd != lxSETUP_COLORMD_DEFAULT) &&
+    this->setup->m_colormd_app_walls;
+  double innerWallColoring = this->setup->m_inner_walls_coloring;
+  if (innerWallColoring < 0.0) innerWallColoring = 0.0;
+  if (innerWallColoring > 1.0) innerWallColoring = 1.0;
+  bool backFace;
 
 #define draw3vert(N) \
   ptc = pdt->GetPoint(cPts[N]); \
   nmv = nms->GetTuple(cPts[N]); \
   glNormal3f(nmv[0],nmv[1],nmv[2]); \
-  if ((!this->setup->cam_anaglyph) && (this->setup->m_colormd != lxSETUP_COLORMD_DEFAULT) && (this->setup->m_colormd_app_walls)) { \
+  if (altitudeColors) { \
   this->data->luTable->GetColor(ptc[2], nmvv); \
+  if (backFace) { \
+  clr[0] = 1.0 - innerWallColoring + innerWallColoring * nmvv[0]; \
+  clr[1] = 1.0 - innerWallColoring + innerWallColoring * nmvv[1]; \
+  clr[2] = 1.0 - innerWallColoring + innerWallColoring * nmvv[2]; \
+  } else { \
   clr[0] = nmvv[0]; clr[1] = nmvv[1]; clr[2] = nmvv[2]; \
+  } \
   glColor4fv(clr); \
   } \
   glVertex3f(lxShiftVecX3(ptc, this->shift));
 
-  tgs->InitTraversal();
-  glBegin(GL_TRIANGLES);
-  while (tgs->GetNextCell(nPts, cPts) != 0) {
-    if (nPts == 3) {      
-      draw3vert(0);
-      draw3vert(1);
-      draw3vert(2);
+  glEnable(GL_CULL_FACE);
+  for (int face = 0; face < 2; face++) {
+    backFace = face == 0;
+    if ((backFace && !this->setup->m_render_inner_walls) ||
+      (!backFace && !this->setup->m_render_outer_walls))
+      continue;
+    glCullFace(backFace ? GL_FRONT : GL_BACK);
+    if (!altitudeColors) {
+      clr[0] = backFace ? 1.0 : 0.61;
+      clr[1] = 1.0;
+      clr[2] = 1.0;
+      glColor4fv(clr);
     }
-  }
-  glEnd();
 
-  tss->InitTraversal();
-  while (tss->GetNextCell(nPts, cPts) != 0) {
-    glBegin(GL_TRIANGLE_STRIP);
-    for(xP = 0; xP < nPts; xP++) {
-      draw3vert(xP);
+    tgs->InitTraversal();
+    glBegin(GL_TRIANGLES);
+    while (tgs->GetNextCell(nPts, cPts) != 0) {
+      if (nPts == 3) {
+        draw3vert(0);
+        draw3vert(1);
+        draw3vert(2);
+      }
     }
     glEnd();
+
+    tss->InitTraversal();
+    while (tss->GetNextCell(nPts, cPts) != 0) {
+      glBegin(GL_TRIANGLE_STRIP);
+      for(xP = 0; xP < nPts; xP++) {
+        draw3vert(xP);
+      }
+      glEnd();
+    }
   }
+  glDisable(GL_CULL_FACE);
 
   glDisable(GL_COLOR_MATERIAL);
 
@@ -893,12 +1319,14 @@ void lxGLCanvas::RenderSurface() {
   glShadeModel(GL_SMOOTH);
   glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
   glColor4f(1.0,1.0,1.0,this->setup->m_srf_opacity);
-  if (this->setup->m_srf_transparency && (clr[3] < 1.0)) {  
-
-    lxVec viewDir;
-    viewDir = this->setup->cam_center - this->setup->cam_pos;
-    viewDir.Normalize();
-    this->data->surfaceSorted->SetVector(viewDir.x, viewDir.y, viewDir.z);
+  bool useTransparency = this->setup->m_srf_transparency && (clr[3] < 1.0);
+  if (useTransparency) {
+    if (this->m_sTransparencySorting) {
+      lxVec viewDir;
+      viewDir = this->setup->cam_center - this->setup->cam_pos;
+      viewDir.Normalize();
+      this->data->surfaceSorted->SetVector(viewDir.x, viewDir.y, viewDir.z);
+    }
 
     glDepthMask(GL_FALSE);
     glEnable(GL_DEPTH_TEST);
@@ -935,9 +1363,13 @@ void lxGLCanvas::RenderSurface() {
   vtkIdType nPts;
   double * nmv, * ptc;
 
-  this->data->surfaceSorted->Update();
-
-  vtkPolyData * pdt = this->data->surfaceSorted->GetOutput();
+  vtkPolyData * pdt;
+  if (useTransparency && this->m_sTransparencySorting) {
+    this->data->surfaceSorted->Update();
+    pdt = this->data->surfaceSorted->GetOutput();
+  } else {
+    pdt = this->data->surfaceTriangle->GetOutput();
+  }
   vtkCellArray * tgs = pdt->GetPolys();
   vtkDataArray * nms = pdt->GetPointData()->GetNormals();
   tgs->InitTraversal();
@@ -1363,7 +1795,7 @@ void lxGLCanvas::RenderAll() {
   if (this->setup->m_vis_centerline)
     this->RenderCenterline();
 
-  glEnable(GL_CULL_FACE);
+  glDisable(GL_CULL_FACE);
   glCullFace(GL_BACK);
   if (this->setup->m_vis_walls)
     this->RenderScrapWalls();  
@@ -1968,8 +2400,3 @@ bool lxGLCanvas::TRCEndTile()
   else
     return false;
 }
-
-
-
-
-

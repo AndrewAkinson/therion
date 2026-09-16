@@ -28,6 +28,9 @@ enum {
   lxSS_SRF_LIGHTING,
   lxSS_WALLS_TRANSPARENCY,
   lxSS_WALLS_OPACITY,
+  lxSS_WALLS_RENDER_OUTER,
+  lxSS_WALLS_RENDER_INNER,
+  lxSS_WALLS_INNER_COLORING,
   lxSS_COLORMD_ALTITUDE,
   lxSS_COLORMD_DEFAULT,
   lxSS_COLORAPP_CENTERLINE,
@@ -60,6 +63,8 @@ BEGIN_EVENT_TABLE(lxModelSetupDlg, wxMiniFrame)
   EVT_CHECKBOX(lxSS_VIS_GRID, lxModelSetupDlg::OnCommand)
   EVT_CHECKBOX(lxSS_VIS_INDICATORS, lxModelSetupDlg::OnCommand)
   EVT_CHECKBOX(lxSS_WALLS_TRANSPARENCY, lxModelSetupDlg::OnCommand)
+  EVT_CHECKBOX(lxSS_WALLS_RENDER_OUTER, lxModelSetupDlg::OnCommand)
+  EVT_CHECKBOX(lxSS_WALLS_RENDER_INNER, lxModelSetupDlg::OnCommand)
   EVT_CHECKBOX(lxSS_SRF_TRANSPARENCY, lxModelSetupDlg::OnCommand)
   EVT_CHECKBOX(lxSS_SRF_TEXTURE, lxModelSetupDlg::OnCommand)
   EVT_CHECKBOX(lxSS_SRF_LIGHTING, lxModelSetupDlg::OnCommand)
@@ -79,6 +84,7 @@ BEGIN_EVENT_TABLE(lxModelSetupDlg, wxMiniFrame)
   EVT_MOVE(lxModelSetupDlg::OnMove)
   EVT_CLOSE(lxModelSetupDlg::OnClose)
   EVT_COMMAND_SCROLL(lxSS_WALLS_OPACITY, lxModelSetupDlg::OnSlider)
+  EVT_COMMAND_SCROLL_THUMBRELEASE(lxSS_WALLS_INNER_COLORING, lxModelSetupDlg::OnSlider)
   EVT_COMMAND_SCROLL(lxSS_SRF_OPACITY, lxModelSetupDlg::OnSlider)
 	EVT_LISTBOX(LXMSTP_CONTROLLB, lxModelSetupDlg::OnControlSelect)
   EVT_TEXT(lxSS_IND_PNAME, lxModelSetupDlg::OnCommand)
@@ -106,6 +112,14 @@ void lxModelSetupDlg::OnCommand(wxCommandEvent& event)
 
     case lxSS_WALLS_TRANSPARENCY:
       this->m_mainFrame->ToggleWallsTransparency();
+      break;
+
+    case lxSS_WALLS_RENDER_OUTER:
+      this->m_mainFrame->ToggleRenderOuterWalls();
+      break;
+
+    case lxSS_WALLS_RENDER_INNER:
+      this->m_mainFrame->ToggleRenderInnerWalls();
       break;
 
     case lxSS_VIS_CENTERLINE:
@@ -218,6 +232,12 @@ void lxModelSetupDlg::OnSlider(wxScrollEvent& event)
     case lxSS_WALLS_OPACITY:
       this->m_mainFrame->setup->m_walls_opacity = 1.0 - double(event.GetInt()) / 100.0;
       update = true;
+      break;
+
+    case lxSS_WALLS_INNER_COLORING:
+      this->m_mainFrame->setup->m_inner_walls_coloring = double(event.GetInt()) / 100.0;
+      this->m_mainFrame->canvas->UpdateRenderList();
+      this->m_mainFrame->canvas->ForceRefresh();
       break;
   }
 
@@ -369,9 +389,15 @@ lxModelSetupDlg::lxModelSetupDlg(wxWindow *parent)
 
 	lxBoxSizer = this->m_controlSizer_Walls = new wxBoxSizer(wxVERTICAL);
 
+  ADDCB(lxSS_WALLS_RENDER_OUTER, _("Render outer walls"))
+  ADDCB(lxSS_WALLS_RENDER_INNER, _("Render inner walls"))
   ADDCB(lxSS_WALLS_TRANSPARENCY, _("Transparency"))
   lxBoxSizer->Add(
 		new wxSlider(lxPanel, lxSS_WALLS_OPACITY, 50, 0, 100, wxDefaultPosition, wxDefaultSize),
+    0, wxEXPAND | wxBOTTOM, lxBORDER);
+  ADDST(wxID_ANY, _("Inner walls coloring"))
+  lxBoxSizer->Add(
+		new wxSlider(lxPanel, lxSS_WALLS_INNER_COLORING, 39, 0, 100, wxDefaultPosition, wxDefaultSize),
     0, wxEXPAND | wxBOTTOM, lxBORDER);
   
   this->m_controlSizer->Add(lxBoxSizer, 1, wxEXPAND);
@@ -548,9 +574,9 @@ void lxModelSetupDlg::LoadSetup()
   lxFSlider(lxSS_SRF_OPACITY)->SetValue(100 - int(stp->m_srf_opacity * 100.0));
 
   lxFCheckBox(lxSS_WALLS_TRANSPARENCY)->SetValue(stp->m_walls_transparency);
+  lxFCheckBox(lxSS_WALLS_RENDER_OUTER)->SetValue(stp->m_render_outer_walls);
+  lxFCheckBox(lxSS_WALLS_RENDER_INNER)->SetValue(stp->m_render_inner_walls);
   lxFSlider(lxSS_WALLS_OPACITY)->SetValue(100 - int(stp->m_walls_opacity * 100.0));
+  lxFSlider(lxSS_WALLS_INNER_COLORING)->SetValue(int(stp->m_inner_walls_coloring * 100.0));
 
 }
-
-
-

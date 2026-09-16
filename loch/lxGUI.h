@@ -60,7 +60,11 @@ enum {
   LXMENU_CAMERA_DEFAULTS,
   LXMENU_CAMERA_PERSP,
   LXMENU_CAMERA_AUTOROTATE,
+  LXMENU_CAMERA_PRESENTATION,
+  LXMENU_CAMERA_PRESENTATION_EXPORT,
+  LXMENU_CAMERA_PRESENTATION_OPTIONS,
   LXMENU_CAMERA_LOCKROT,
+  LXMENU_CAMERA_WALKMODE,
 	LXMENU_VIEW,
   LXMENU_VIEW_FULLSCREEN,
   LXMENU_VIEW_MODELSTP,
@@ -84,7 +88,6 @@ enum {
   LXMENU_HELP_BUGS,
   LXMENU_HELP_ABOUT,
   LXMENU_EXPFIT,
-  LXMENU_EXPROT,
   LXMENU_PRES,
   LXMENU_PRESMARK,
   LXMENU_PRESUPDATE,
@@ -107,14 +110,17 @@ enum {
 	LXTB_PERSP,
 	LXTB_ROTATION,
 	LXTB_LOCKROT,
+  LXTB_PRESENTATION,
   LXTB_PLAN,
   LXTB_PROFILE,
 	LXTB_FIT,
   LXTB_HOME,
 	LXTB_FULLSCREEN,
 	LXTB_STEREO,
+  LXTB_WALKMODE,
 	LXTB_VIEWSTP,
 	LXTB_SCENESTP,
+  LXTB_PRESENTDLG,
   LXTB_VISCENTERLINE,
   LXTB_VISWALLS,
   LXTB_VISSURFACE,
@@ -201,13 +207,16 @@ class lxFrame: public wxFrame
     void ToggleStereo();
     void ToggleStereoBW();
 		void ToggleRotation();
+    void TogglePresentationAnimation();
 		void ToggleRotLock();
+    void ToggleWalkMode();
     void ToggleFullScreen();
     void ToggleModelSetup();
     void ToggleSurveyStats();
     void ToggleSelectionSetup();
     void TogglePresentationDlg();
     void ToggleViewpointSetup();
+    void ResizeCanvas();
 
     void ToggleVisibilityCenterline();
     void ToggleVisibilityCenterlineCave();
@@ -227,7 +236,6 @@ class lxFrame: public wxFrame
     void ToggleVisibilityStLabelComment();
     void ToggleVisibilityStLabelAltitude();
     void ToggleVisibilityStLabelSurvey();
-    void ExportRotationPictures();
 
     void SetColorMode(int);
     void DetectFileType();
@@ -240,6 +248,8 @@ class lxFrame: public wxFrame
     void ToggleSurfaceLighting();
 
     void ToggleWallsTransparency();
+    void ToggleRenderOuterWalls();
+    void ToggleRenderInnerWalls();
 
     void SetupUpdate();
     void SetupApply();
@@ -275,5 +285,3 @@ class lxApp: public wxGLApp
 }; // lxApp
 
 #endif
-
-

@@ -41,6 +41,9 @@
 #include "thlog.h"
 #include "thparse.h"
 #include "img.h"
+
+#include <fmt/format.h>
+
 #include <math.h>
 #include <string>
 #include <fstream>
@@ -220,7 +223,7 @@ void thsvxctrl::write_survey_leg(thdataleg * legp)
     }
   }
   
-  if (legp->flags != this->pdl.flags) {
+  if (thsvx_flags_changed(legp->flags, this->pdl.flags)) {
     fprintf(this->svxf,"*flags");
     if ((legp->flags & TT_LEGFLAG_DUPLICATE) == TT_LEGFLAG_NONE) fprintf(this->svxf," not");
     fprintf(this->svxf," duplicate");
@@ -489,7 +492,7 @@ void thsvxctrl::process_survey_data(class thdatabase * dbp)
 //   double sx, sy, sz;
 //   unsigned long ss;
 //   size_t lnsize = 4096, pix = 0, ppx = 0, clns;
-//   svxcom.guarantee(lnsize);
+//   svxcom.resize(lnsize);
 //   char * lnbuff = svxcom.data(),
 //     * p[4], * cps = lnbuff;
 //   posf.open(thtmp.get_file_name("data.pos"));
@@ -764,8 +767,6 @@ void thsvxctrl::load_err_file(class thdatabase * dbp, const char * lfnm) {
 							else {
 //								thprint("LEG not found!!!\n");
 							}
-						}
-						else if (strcmp(b.get_buffer()[i-1],"=") == 0) {
 						}
 						prev_st = st;
 					}

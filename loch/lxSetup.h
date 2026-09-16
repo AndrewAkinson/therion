@@ -46,10 +46,10 @@ struct lxSetup {
        m_vis_centerline_station, m_vis_centerline_entrance, m_vis_centerline_fix, m_vis_centerline_duplicate,
        m_stlabel_comment, m_stlabel_name, m_stlabel_altitude, m_stlabel_survey;
   bool m_srf_transparency, m_srf_texture, m_srf_lighting;
-  bool m_walls_transparency;
+  bool m_walls_transparency, m_render_outer_walls, m_render_inner_walls;
   bool m_colormd_app_centerline,
     m_colormd_app_walls;
-  double m_srf_opacity, m_walls_opacity;
+  double m_srf_opacity, m_walls_opacity, m_inner_walls_coloring;
 
   std::set<std::string> m_survey_selection;
   
@@ -65,10 +65,15 @@ struct lxSetup {
   
   void StartCameraMovement();
   void ZoomCamera(double zoom);
+  void WalkCamera(double zoom, double rot, double tilt = 0.0);
+  void WalkZoomCamera(double zoom);
   void PanCamera(double panx, double pany);
   void TiltCamera(double tilt);
+  void WalkTiltCamera(double tilt);
   void RotateCamera(double rot);
+  void WalkRotateCamera(double rot);
 	void RotateCameraF(double rot);
+  static double AnimationTransitionProgress(double t, bool transitionFrom, bool transitionTo);
   void SetLens(double lens);
   void UpdatePos();
 
@@ -77,7 +82,9 @@ struct lxSetup {
   void ClearSurveySelection();
   
   void SaveToXMLNode(wxXmlNode * n);
-  void LoadFromXMLNode(wxXmlNode * n, wxXmlNode * nn = NULL, double t = 0.0);
+  void LoadFromXMLNode(wxXmlNode * n, wxXmlNode * nn = NULL, double t = 0.0, bool interpolateCameraPosition = false);
+  void SaveSceneToXMLNode(wxXmlNode * n);
+  void LoadSceneFromXMLNode(wxXmlNode * n);
 
 };
 

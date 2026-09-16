@@ -60,8 +60,6 @@ endif()
 
 # tell CMake which files must be generated now, doing so in subfolders is too late
 set_source_files_properties(
-    ${CMAKE_BINARY_DIR}/thchencdata.h
-    ${CMAKE_BINARY_DIR}/thchencdata.cxx
     ${CMAKE_BINARY_DIR}/thversion.h
     PROPERTIES GENERATED TRUE 
 )
@@ -127,12 +125,11 @@ if (BUILD_THERION)
     install(TARGETS therion RUNTIME COMPONENT th-runtime)
     install(FILES therion.ini TYPE SYSCONF RENAME therion.ini.new COMPONENT th-runtime)
     install(CODE
-        "if (NOT EXISTS ${TH_PATH_INI}/therion.ini)
-            file(INSTALL ${CMAKE_CURRENT_SOURCE_DIR}/therion.ini DESTINATION ${TH_PATH_INI})
+        "if (NOT EXISTS \"${TH_PATH_INI}/therion.ini\")
+            file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/therion.ini\" DESTINATION \"${TH_PATH_INI}\")
         endif()"
         COMPONENT th-runtime)
 
-    add_subdirectory(thchencdata)
     add_subdirectory(samples)
 endif()
 
@@ -147,12 +144,13 @@ if (BUILD_LOCH)
 endif()
 
 # deployment of DLL dependencies on Windows
-if (BUILD_THERION AND BUILD_LOCH AND WIN32)
+if (BUILD_THERION AND BUILD_LOCH AND MSYS)
     set(DLLS_DIR ${CMAKE_BINARY_DIR}/dependencies)
     add_custom_target(deploy 
         ${CMAKE_COMMAND} -D THERION=$<TARGET_FILE:therion>
                          -D LOCH=$<TARGET_FILE:loch>
                          -D DLLS_DIR=${DLLS_DIR}
+                         -D ImageMagick_VERSION=${ImageMagick_VERSION_STRING}
                          -P cmake/Deploy.cmake
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_target_properties(deploy PROPERTIES ADDITIONAL_CLEAN_FILES ${DLLS_DIR})

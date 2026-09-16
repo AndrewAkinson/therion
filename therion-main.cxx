@@ -39,6 +39,11 @@
 #include "thdatabase.h"
 #include "thlog.h"
 
+#include <Magick++/Functions.h>
+
+#include <fmt/format.h>
+
+#include <filesystem>
 #include <fstream>
 
 extern const thstok thtt_texts [];
@@ -78,6 +83,17 @@ int main(int argc, char * argv[]) {
 
     // set some system parameters
     thexecute_cmd = argv[0];
+
+    // initialize ImageMagick library
+#ifdef THWIN32
+    // detect deployed ImageMagick DLLs
+    if (const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
+        std::filesystem::exists(exe_dir / "jpeg.dll") && std::filesystem::exists(exe_dir / "jpeg.la"))
+    {
+      putenv(fmt::format("MAGICK_CODER_MODULE_PATH={}", exe_dir.string()).c_str());
+    }
+#endif
+    Magick::InitializeMagick(*argv);
   
     // process command line
     thcmdln.process(argc, argv);

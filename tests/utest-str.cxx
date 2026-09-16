@@ -5,35 +5,38 @@
 #include <catch2/catch.hpp>
 #endif
 #include "icase.h"
+#include "thchenc.h"
+#include "thchencdata.h"
 #include "thparse.h"
 #include "thcsdata.h"
 #include "thsvg.h"
 
 using namespace std::string_literals;
 
-TEST_CASE("icase_equals")
+TEST_CASE("icase_equal")
 {
+    const icase_equal comparator;
+    REQUIRE(comparator("", ""));
+    REQUIRE(comparator("hello", "hello"));
+    REQUIRE(comparator("hello", "HELLO"s));
+    REQUIRE(comparator("hElLo"s, "HELLO"));
+    REQUIRE(comparator("HeLlo"s, "hello"s));
 
-    REQUIRE(icase_equals("", ""));
-    REQUIRE(icase_equals("hello", "hello"));
-    REQUIRE(icase_equals("hello", "HELLO"s));
-    REQUIRE(icase_equals("hElLo"s, "HELLO"));
-    REQUIRE(icase_equals("HeLlo"s, "hello"s));
-
-    REQUIRE_FALSE(icase_equals("hello", "world"));
-    REQUIRE_FALSE(icase_equals("hello", "world!"));
-    REQUIRE_FALSE(icase_equals("hello"s, "WORLD"s));
+    REQUIRE_FALSE(comparator("hello", "world"));
+    REQUIRE_FALSE(comparator("hello", "world!"));
+    REQUIRE_FALSE(comparator("hello"s, "WORLD"s));
 }
 
-TEST_CASE("icase_less_than")
+TEST_CASE("icase_less")
 {
-    REQUIRE(icase_less_than("hello", "world"));
-    REQUIRE(icase_less_than("hello", "World"));
-    REQUIRE(icase_less_than("Hello", "world"));
-    REQUIRE(icase_less_than("Hello", "World"));
-    REQUIRE_FALSE(icase_less_than("hello", "aworld"s));
-    REQUIRE_FALSE(icase_less_than("hello"s, "HELLO"));
-    REQUIRE_FALSE(icase_less_than("HELLO"s, "hello"s));
+    const icase_less comparator;
+    REQUIRE(comparator("hello", "world"));
+    REQUIRE(comparator("hello", "World"));
+    REQUIRE(comparator("Hello", "world"));
+    REQUIRE(comparator("Hello", "World"));
+    REQUIRE_FALSE(comparator("hello", "aworld"s));
+    REQUIRE_FALSE(comparator("hello"s, "HELLO"));
+    REQUIRE_FALSE(comparator("HELLO"s, "hello"s));
 }
 
 TEST_CASE("thstok")
@@ -94,4 +97,24 @@ TEST_CASE("sanitize_xml_id", "[string]")
     CHECK(sanitize_xml_id(":a1_:") == ":a1_:");
     CHECK(sanitize_xml_id("@a/b") == "_a_b");
     CHECK(sanitize_xml_id("!@#$%^&*()[X]") == "___________X_");
+}
+
+TEST_CASE("thdecode")
+{
+    CHECK(thdecode(TT_UTF_8, "äbc") == "\xC3\xA4" "bc");
+    CHECK(thdecode(TT_ISO8859_1, "äbc") == "\xE4" "bc");
+}
+
+TEST_CASE("thencode")
+{
+    CHECK(thencode("äbc", TT_UTF_8) == "\xC3\xA4" "bc");
+    CHECK(thencode("\xE4" "bc", TT_ISO8859_1) == "\xC3\xA4" "bc");
+}
+
+TEST_CASE("thdecode_sql")
+{
+    CHECK(thdecode_sql("") == "NULL");
+    CHECK(thdecode_sql("SELECT Lorem FROM Ipsum;") == "'SELECT Lorem FROM Ipsum;'");
+    CHECK(thdecode_sql("Let's test quotes.") == "'Let''s test quotes.'");
+    CHECK(thdecode_sql("'''''") == "''''''''''''");
 }
