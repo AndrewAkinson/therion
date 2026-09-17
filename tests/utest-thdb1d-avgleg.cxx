@@ -1,11 +1,10 @@
 /**
  * @file utest-thdb1d-avgleg.cxx
- * Unit tests for consecutive-leg averaging in thdb1d, including legs whose
- * stations are written in reversed order (e.g. 5->4 following 4->5).
+ * Unit tests for consecutive-leg averaging via thdb1d_average_consecutive_legs().
  *
- * The averaging logic is tested by constructing thdataleg objects with
- * total_dx/dy/dz pre-set (as thdb1d does after polar->Cartesian conversion)
- * and then running the same loop that lives in thdb1d::process_data().
+ * Tests construct thdataleg objects with total_dx/dy/dz pre-set (as thdb1d
+ * does after polar->Cartesian conversion) and call the production function
+ * directly, so any change to the averaging logic is immediately reflected here.
  *
  * All legs use data_type = TT_DATATYPE_NORMAL and flags = TT_LEGFLAG_NONE
  * unless a test is specifically exercising those guards.
@@ -17,11 +16,9 @@
 #include <catch2/catch.hpp>
 #endif
 
-#include "thdataleg.h"
-#include "thinfnan.h"
+#include "thdb1d.h"
 
 #include <cmath>
-#include <list>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -73,72 +70,6 @@ static thdataleg make_leg(unsigned long from_id, unsigned long to_id,
     return leg;
 }
 
-/**
- * Run the averaging loop from thdb1d::process_data() over a leg list.
- * This is a verbatim copy of the production loop so that the tests exercise
- * exactly the same code path.
- */
-static void run_averaging(thdataleg_list & leg_list)
-{
-    thdataleg_list::iterator prev_lei = leg_list.end();
-    int avg_count = 0;
-
-    for (auto lei = leg_list.begin(); lei != leg_list.end(); lei++) {
-        if (!lei->is_valid)
-            continue;
-
-        bool same_order = (avg_count > 0
-            && prev_lei != leg_list.end()
-            && lei->from.id == prev_lei->from.id
-            && lei->to.id   == prev_lei->to.id
-            && lei->data_type == prev_lei->data_type
-            && lei->flags     == prev_lei->flags);
-
-        bool is_reversed_leg = (!same_order
-            && avg_count > 0
-            && prev_lei != leg_list.end()
-            && lei->from.id == prev_lei->to.id
-            && lei->to.id   == prev_lei->from.id
-            && lei->data_type == prev_lei->data_type
-            && lei->flags     == prev_lei->flags);
-
-        if (same_order || is_reversed_leg) {
-            double merge_dx = is_reversed_leg ? -lei->total_dx : lei->total_dx;
-            double merge_dy = is_reversed_leg ? -lei->total_dy : lei->total_dy;
-            double merge_dz = is_reversed_leg ? -lei->total_dz : lei->total_dz;
-
-            prev_lei->total_dx = (prev_lei->total_dx * avg_count + merge_dx) / (avg_count + 1);
-            prev_lei->total_dy = (prev_lei->total_dy * avg_count + merge_dy) / (avg_count + 1);
-            prev_lei->total_dz = (prev_lei->total_dz * avg_count + merge_dz) / (avg_count + 1);
-
-            prev_lei->adj_dx = prev_lei->total_dx;
-            prev_lei->adj_dy = prev_lei->total_dy;
-            prev_lei->adj_dz = prev_lei->total_dz;
-
-            prev_lei->total_length   = thdxyz2length(prev_lei->total_dx, prev_lei->total_dy, prev_lei->total_dz);
-            prev_lei->total_bearing  = thdxyz2bearing(prev_lei->total_dx, prev_lei->total_dy, prev_lei->total_dz);
-            prev_lei->total_gradient = thdxyz2clino(prev_lei->total_dx, prev_lei->total_dy, prev_lei->total_dz);
-
-            prev_lei->length = (prev_lei->length * avg_count + lei->length) / (avg_count + 1);
-            if (prev_lei->direction) {
-                prev_lei->bearing  = prev_lei->total_bearing;
-                prev_lei->gradient = prev_lei->total_gradient;
-            } else {
-                prev_lei->bearing = prev_lei->total_bearing - 180.0;
-                if (prev_lei->bearing < 0.0)
-                    prev_lei->bearing += 360.0;
-                prev_lei->gradient = -prev_lei->total_gradient;
-            }
-
-            lei->is_valid = false;
-            avg_count++;
-        } else {
-            prev_lei = lei;
-            avg_count = 1;
-        }
-    }
-}
-
 /** Count legs that remain valid after averaging. */
 static int count_valid(const thdataleg_list & legs)
 {
@@ -169,7 +100,7 @@ TEST_CASE("avg_two_forward_legs")
     legs.push_back(make_leg(4UL, 5UL, 2.41, 25.1, 23.2));
     legs.push_back(make_leg(4UL, 5UL, 2.43, 25.1, 23.1));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 1);
     thdataleg result = first_valid(legs);
@@ -187,7 +118,7 @@ TEST_CASE("avg_three_forward_legs")
     legs.push_back(make_leg(4UL, 5UL, 2.43, 25.1, 23.1));
     legs.push_back(make_leg(4UL, 5UL, 2.41, 25.0, 23.2));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 1);
     double expected_length = (2.41 + 2.43 + 2.41) / 3.0;
@@ -207,7 +138,7 @@ TEST_CASE("avg_same_pair_reversed_order_second")
     legs.push_back(make_leg(4UL, 5UL, 2.41, 25.1,  23.2));
     legs.push_back(make_leg(5UL, 4UL, 2.39, 205.2, -23.4));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 1);
     thdataleg result = first_valid(legs);
@@ -230,7 +161,7 @@ TEST_CASE("avg_same_pair_reversed_order_first")
     legs.push_back(make_leg(7UL, 6UL, 2.39, 205.2, -23.4));
     legs.push_back(make_leg(6UL, 7UL, 2.41, 25.1,   23.2));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 1);
     thdataleg result = first_valid(legs);
@@ -252,7 +183,7 @@ TEST_CASE("avg_same_pair_multiple_reversed")
     legs.push_back(make_leg(5UL, 4UL, 2.39, 205.2, -23.4));
     legs.push_back(make_leg(5UL, 4UL, 2.40, 205.0, -23.3));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 1);
     REQUIRE(first_valid(legs).from.id == 4UL);
@@ -270,7 +201,7 @@ TEST_CASE("avg_same_pair_mixed_order")
     legs.push_back(make_leg(5UL, 4UL, 2.39, 205.2, -23.4));
     legs.push_back(make_leg(4UL, 5UL, 2.43, 25.0,  23.1));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 1);
     REQUIRE(first_valid(legs).from.id == 4UL);
@@ -288,7 +219,7 @@ TEST_CASE("avg_cartesian_direction_after_merge")
     legs.push_back(make_leg(4UL, 5UL, 2.40, 90.0,  0.0));   // due East
     legs.push_back(make_leg(5UL, 4UL, 2.40, 270.0, 0.0));   // due West (reversed)
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 1);
     thdataleg result = first_valid(legs);
@@ -308,7 +239,7 @@ TEST_CASE("no_avg_different_pair")
     legs.push_back(make_leg(4UL, 5UL, 2.41, 25.1, 23.2));
     legs.push_back(make_leg(5UL, 6UL, 2.43, 30.0, 10.0));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 2);
 }
@@ -321,7 +252,7 @@ TEST_CASE("no_avg_non_adjacent_same_order")
     legs.push_back(make_leg(6UL, 7UL, 1.00, 90.0,  0.0));
     legs.push_back(make_leg(4UL, 5UL, 2.43, 25.0, 23.1));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 3);
 }
@@ -335,7 +266,7 @@ TEST_CASE("no_avg_non_adjacent_reversed")
     legs.push_back(make_leg(6UL, 7UL, 1.00, 90.0,   0.0));
     legs.push_back(make_leg(5UL, 4UL, 2.39, 205.2, -23.4));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 3);
 }
@@ -347,7 +278,7 @@ TEST_CASE("no_avg_different_flags")
     legs.push_back(make_leg(4UL, 5UL, 2.41, 25.1, 23.2, TT_DATATYPE_NORMAL, TT_LEGFLAG_NONE));
     legs.push_back(make_leg(4UL, 5UL, 2.43, 25.0, 23.1, TT_DATATYPE_NORMAL, TT_LEGFLAG_SURFACE));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 2);
 }
@@ -359,7 +290,7 @@ TEST_CASE("no_avg_different_data_type")
     legs.push_back(make_leg(4UL, 5UL, 2.41, 25.1, 23.2, TT_DATATYPE_NORMAL,    TT_LEGFLAG_NONE));
     legs.push_back(make_leg(4UL, 5UL, 2.43, 25.0, 23.1, TT_DATATYPE_CARTESIAN, TT_LEGFLAG_NONE));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 2);
 }
@@ -371,7 +302,7 @@ TEST_CASE("no_avg_reversed_different_flags")
     legs.push_back(make_leg(4UL, 5UL, 2.41, 25.1,  23.2, TT_DATATYPE_NORMAL, TT_LEGFLAG_NONE));
     legs.push_back(make_leg(5UL, 4UL, 2.39, 205.2, -23.4, TT_DATATYPE_NORMAL, TT_LEGFLAG_DUPLICATE));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 2);
 }
@@ -393,7 +324,7 @@ TEST_CASE("avg_length_correctness_four_legs")
     legs.push_back(make_leg(4UL, 5UL, 2.41, 25.0,  23.2));
     legs.push_back(make_leg(5UL, 4UL, 2.39, 205.2, -23.4));
 
-    run_averaging(legs);
+    thdb1d_average_consecutive_legs(legs);
 
     REQUIRE(count_valid(legs) == 1);
     double expected_length = (2.41 + 2.43 + 2.41 + 2.39) / 4.0;
