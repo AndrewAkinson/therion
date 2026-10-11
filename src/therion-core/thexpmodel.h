@@ -47,6 +47,7 @@ enum {
   TT_EXPMODEL_OPT_WALLSRC,  ///< Output option.
   TT_EXPMODEL_OPT_ENCODING,  ///< Output encoding.
   TT_EXPMODEL_OPT_VIEWERSRC,  ///< HTML viewer source.
+  TT_EXPMODEL_OPT_SECTIONSPACING,  ///< Spacing of sections in the model from drawings.
 };
 
 
@@ -61,6 +62,7 @@ static const thstok thtt_expmodel_opt[] = {
   {"-encoding", TT_EXPMODEL_OPT_ENCODING},
   {"-fmt", TT_EXPMODEL_OPT_FORMAT},
   {"-format", TT_EXPMODEL_OPT_FORMAT},
+  {"-section-spacing", TT_EXPMODEL_OPT_SECTIONSPACING},
   {"-viewer-source", TT_EXPMODEL_OPT_VIEWERSRC},
   {"-wall-source", TT_EXPMODEL_OPT_WALLSRC},
   {NULL, TT_EXPMODEL_OPT_UNKNOWN}

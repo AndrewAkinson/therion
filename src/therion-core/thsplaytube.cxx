@@ -48,6 +48,8 @@
 
 #include <fmt/format.h>
 
+thsplaytube_options thsplaytube_opt;
+
 namespace {
 
 const double CANDIDATE_ANGLE = 45.0;  // max. angle of splays to the reference plane for plane fitting [deg]
@@ -57,7 +59,6 @@ const double STEEP = 0.7;  // |z| of the bisector above which the plane is not k
 const double MAX_GAP = 150.0;  // larger angular gaps are closed at the station [deg]
 const double VIRTUAL_MIN = 0.2;  // drawn wall this far beyond the section's furthest point gets a virtual splay [m]
 const double OUTSIDE_REPORT = 0.5;  // splay ends this far outside the drawn walls are reported [m]
-const double MAP_SPACING = 1.0;  // spacing of sections along legs in the model from maps and sections [m]
 const double BRANCH_OPENING = 1.5;  // a branch stops where its drawn width grows by this factor (junction)
 const double BRANCH_END = 1.0;  // and at the latest this far before the junction station [m]
 const double BRANCH_OVERLAP = 0.5;  // a branch that cannot be joined to its junction runs this far into it [m]
@@ -891,7 +892,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     if (splay_body(c, splays, junctions)) nbodies++;
   }
 
-  // Model from maps and sections: sections every MAP_SPACING along each leg
+  // Model from maps and sections: sections along each leg (see positions)
   // (each the tube between the two station sections at that point), stretched
   // sideways only, right and left separately, to the drawn plan walls on the
   // horizontal line across the passage there.
@@ -971,6 +972,31 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     if ((fac > STRETCH_REPORT) || (fac < 1.0 / STRETCH_REPORT))
       vreport += fmt::format("{:>30}  height x{:.2f} ({:.2f} -> {:.2f} m)\n", where, fac, top - bot, roof - floor);
   };
+  // Fractions along a leg (up to fmax) for the sections: wherever the drawn
+  // width or height has changed by more than spacing_change percent since the
+  // last section, at least spacing_min and at most spacing_max apart. measure(f)
+  // gives (width, height) at f, negative where not drawn.
+  auto positions = [&](double len, double fmax, const std::function<lxVec(double)> & measure) {
+    std::vector<double> fs = {0.0};
+    double mn = std::max(0.05, thsplaytube_opt.spacing_min), mx = std::max(mn, thsplaytube_opt.spacing_max),
+      chg = thsplaytube_opt.spacing_change / 100.0;
+    if (len * fmax <= 1e-6) return fs;
+    int ns = std::max(1, (int) ceil(fmax * len / mn));
+    double step = fmax * len / ns, last = 0.0;
+    lxVec ml = measure(0.0);
+    auto changed = [chg](double a, double b) { return (a > 0.0) && (b > 0.0) && (std::fabs(b - a) > chg * a); };
+    for (int k = 1; k <= ns; k++) {
+      double f = fmax * k / ns, dist = (f - last) * len;
+      lxVec mv = measure(f);
+      if ((k == ns) || changed(ml.x, mv.x) || changed(ml.y, mv.y) || (dist + step > mx + 1e-9)) {
+        fs.push_back(f);
+        last = f;
+        ml = mv;
+      }
+    }
+    return fs;
+  };
+  size_t nlegspaced = 0;
   auto ring = [&](const std::vector<lxVec> & P) {
     std::vector<thdb3dvx *> r;
     for (const lxVec & p : P) r.push_back(map_tubes.insert_vertex(p));
@@ -1044,9 +1070,15 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
           std::vector<thdb3dvx *> prev = ring(P0);
           double fend = 0.0;
           std::vector<lxVec> Pend = P0;
-          int nseg = std::max(1, (int) ceil(fmax * len / MAP_SPACING));
-          for (int m = 1; (m <= nseg) && (fmax > 0.0); m++) {
-            double f = fmax * m / nseg;
+          std::vector<double> fs = positions(len, fmax, [&](double f) {
+            lxVec c = a.c + f * (cj - a.c);
+            double r1, l1, ef, er;
+            return lxVec(drawn.width(c.x, c.y, h, r1, l1) ? r1 + l1 : -1.0,
+              leg_elevation(i, j, f, ef, er) ? er - ef : -1.0, 0.0);
+          });
+          nlegspaced++;
+          for (size_t m = 1; (m < fs.size()) && (fmax > 0.0); m++) {
+            double f = fs[m];
             lxVec c = a.c + f * (cj - a.c);
             if (w0 && drawn.width(c.x, c.y, h, wr, wl) && (wr + wl > BRANCH_OPENING * (w0r + w0l))) break;
             std::vector<lxVec> P;
@@ -1209,10 +1241,17 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         lxVec ha = horizontal(a.u), hb = horizontal(b.u);
         if (flip) hb = -1.0 * hb;
         double len = std::hypot(b.c.x - a.c.x, b.c.y - a.c.y);
-        int nseg = std::max(1, (int) ceil(len / MAP_SPACING));
+        std::vector<double> fs = positions(len, 1.0, [&](double f) {
+          lxVec c = (1.0 - f) * a.c + f * b.c, h = horizontal((1.0 - f) * ha + f * hb);
+          double r1, l1, ef, er;
+          return lxVec(drawn.width(c.x, c.y, h, r1, l1) ? r1 + l1 : -1.0,
+            leg_elevation(i, j, f, ef, er) ? er - ef : -1.0, 0.0);
+        });
+        nlegspaced++;
+        size_t nseg = fs.size() - 1;
         std::vector<thdb3dvx *> prev;
-        for (int m = 0; m <= nseg; m++) {
-          double f = double(m) / nseg;
+        for (size_t m = 0; m <= nseg; m++) {
+          double f = fs[m];
           std::vector<lxVec> P;
           for (size_t k = 0; k < ra.size(); k++)
             P.push_back((1.0 - f) * ra[k]->get_vector() + f * rb[k]->get_vector());
@@ -1560,8 +1599,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     }
 
   if (usemap) {
-    thlog(fmt::format("\nModel from maps and sections: {} sections stretched to the drawn walls ({} rings, every {:.1f} m).\n",
-      nstretched, nrings, MAP_SPACING));
+    thlog(fmt::format("\nModel from maps and sections: {} sections stretched to the drawn walls ({} rings on {} legs;\n"
+      "a section wherever the drawn width or height changes by more than {:.0f}%, {:.2f} to {:.2f} m apart).\n",
+      nstretched, nrings, nlegspaced, thsplaytube_opt.spacing_change, thsplaytube_opt.spacing_min, thsplaytube_opt.spacing_max));
     thlog(fmt::format("Rings scaled to the extended elevation: {} ({} extended scraps).\n", nvscaled, elev.rings.size()));
     if (!vreport.empty())
       thlog(fmt::format("Height scaled by more than {:.1f} times (or less than 1/{:.1f}):\n{}", STRETCH_REPORT, STRETCH_REPORT, vreport));

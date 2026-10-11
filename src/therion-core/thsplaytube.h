@@ -52,6 +52,19 @@
  * @param map_junctions Output junctions of that model, from the drawn outline.
  */
 
+/**
+ * Settings of the model from drawings and sections: a section is placed along
+ * a leg wherever the drawn width or height has changed by more than
+ * spacing_change percent since the last one, at least spacing_min and at most
+ * spacing_max metres apart.
+ */
+
+struct thsplaytube_options {
+  double spacing_change = 15.0, spacing_min = 0.25, spacing_max = 1.0;
+};
+
+extern thsplaytube_options thsplaytube_opt;
+
 void thsplaytube_build(class thdatabase * db, thdb3ddata & walls, thdb3ddata & section_splays,
   thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays,
   thdb3ddata & map_tubes, thdb3ddata & map_junctions);

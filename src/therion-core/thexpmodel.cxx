@@ -26,6 +26,7 @@
  */
  
 #include "thexpmodel.h"
+#include "thsplaytube.h"
 #include "thexception.h"
 #include "thdatabase.h"
 #include "thdb1d.h"
@@ -131,6 +132,27 @@ void thexpmodel::parse_options(int & argx, int nargs, char ** args)
       this->viewersrc = utmp;
       argx++;
       break;
+
+    case TT_EXPMODEL_OPT_SECTIONSPACING: {
+      // -section-spacing <change %> <min m> <max m>
+      double v[3];
+      for (int k = 0; k < 3; k++) {
+        argx++;
+        if (argx >= nargs)
+          throw thexception(fmt::format("missing section spacing -- \"{}\"", args[optx]));
+        int sv;
+        thparse_double(sv, v[k], args[argx]);
+        if ((sv != TT_SV_NUMBER) || (v[k] < 0.0))
+          throw thexception(fmt::format("invalid section spacing -- \"{}\"", args[argx]));
+      }
+      if (v[1] > v[2])
+        throw thexception(fmt::format("section spacing minimum greater than maximum -- \"{} {}\"", args[argx - 1], args[argx]));
+      thsplaytube_opt.spacing_change = v[0];
+      thsplaytube_opt.spacing_min = v[1];
+      thsplaytube_opt.spacing_max = v[2];
+      argx++;
+      break;
+    }
 
     default:
       thexport::parse_options(argx, nargs, args);
