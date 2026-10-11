@@ -68,6 +68,7 @@ const double ELEVATION_NEAR = 0.5;  // a leg outside the drawn elevation by up t
 const double ELEVATION_STEEP = 60.0;  // steeper legs are not scaled to the extended elevation [deg]
 const int OVAL_POINTS = 24;  // points round an oval section of a leg without splay sections
 const double OVAL_END = 1.0;  // an oval leg starts this far from a junction [m] (at most half the leg)
+const double WHOLE_STRETCH = 0.1;  // a side narrower than this times the other: the whole section is stretched
 const double STRETCH_REPORT = 2.0;  // stretches by more than this factor are reported
 const double PAIR_TOLERANCE = 20.0;  // max. position difference of corners joined directly (100 = quarter)
 const double ANCHOR_TIE = 0.05;  // corners this close to an extreme are practically equal [m]
@@ -931,7 +932,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   // horizontal line across the passage there.
   bool usemap = !drawn.scraps.empty();
   std::string stretchreport;
-  size_t nrings = 0, nstretched = 0;
+  size_t nrings = 0, nstretched = 0, nwhole = 0;
   auto horizontal = [](const lxVec & u) {
     lxVec h(u.x, u.y, 0.0);
     if (h.Length() < 1e-6) h = lxVec(1.0, 0.0, 0.0);
@@ -942,10 +943,35 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     double dr, dl;
     if (!drawn.width(c.x, c.y, h, dr, dl)) return;
     double R = 0.0, L = 0.0;
+    lxVec pr = c, pl = c;
     for (const lxVec & p : P) {
       double x = (p - c) * h;
-      R = std::max(R, x);
-      L = std::max(L, -x);
+      if (x > R) { R = x; pr = p; }
+      if (-x > L) { L = -x; pl = p; }
+    }
+    // the drawn wall on the line through each side's furthest corner, so that
+    // the corner itself meets the wall (corners lie a little off the section
+    // line where they are true splay ends)
+    double r1, l1;
+    lxVec q = pr - R * h;
+    if ((R > 0.1) && drawn.width(q.x, q.y, h, r1, l1)) dr = r1;
+    q = pl + L * h;
+    if ((L > 0.1) && drawn.width(q.x, q.y, h, r1, l1)) dl = l1;
+    // a side with (almost) nothing on it, as where the station is against a
+    // wall, cannot be stretched by itself: the whole section is then scaled
+    // and moved across to fill the drawn width
+    if ((R + L > 0.1) && ((std::min(R, L) < 0.1) || (std::min(R, L) < WHOLE_STRETCH * std::max(R, L)))) {
+      double a = (dr + dl) / (R + L), b = dr - a * R;
+      for (lxVec & p : P) {
+        double x = (p - c) * h;
+        p += (x * (a - 1.0) + b) * h;
+      }
+      nstretched++;
+      nwhole++;
+      if ((a > STRETCH_REPORT) || (a < 1.0 / STRETCH_REPORT))
+        stretchreport += fmt::format("{:>30}  whole width x{:.2f} ({:.2f} -> {:.2f} m), moved {:+.2f} m\n",
+          where, a, R + L, dr + dl, b);
+      return;
     }
     double fr = (R > 0.1) ? dr / R : 1.0, fl = (L > 0.1) ? dl / L : 1.0;
     for (lxVec & p : P) {
@@ -1878,6 +1904,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     thlog(fmt::format("\nModel from maps and sections: {} sections stretched to the drawn walls ({} rings on {} legs;\n"
       "a section wherever the drawn width or height changes by more than {:.0f}%, {:.2f} to {:.2f} m apart).\n",
       nstretched, nrings, nlegspaced, thsplaytube_opt.spacing_change, thsplaytube_opt.spacing_min, thsplaytube_opt.spacing_max));
+    thlog(fmt::format("Sections with (almost) nothing on one side, stretched as a whole across the drawn width: {}.\n", nwhole));
     thlog(fmt::format("Rings scaled to the extended elevation: {} ({} extended scraps).\n", nvscaled, elev.rings.size()));
     thlog(fmt::format("Legs without sections drawn as ovals from the drawn LRUD: {} ({} rings).\n", novallegs, novalrings));
     if (!vreport.empty())
