@@ -61,6 +61,8 @@ const double MAP_SPACING = 1.0;  // spacing of sections along legs in the model 
 const double BRANCH_OPENING = 1.5;  // a branch stops where its drawn width grows by this factor (junction)
 const double BRANCH_END = 1.0;  // and at the latest this far before the junction station [m]
 const double BRANCH_OVERLAP = 0.5;  // a branch that cannot be joined to its junction runs this far into it [m]
+const double ELEVATION_NEAR = 0.5;  // a leg outside the drawn elevation by up to this uses the nearest span [m]
+const double ELEVATION_STEEP = 60.0;  // steeper legs are not scaled to the extended elevation [deg]
 const double STRETCH_REPORT = 2.0;  // stretches by more than this factor are reported
 const double PAIR_TOLERANCE = 20.0;  // max. position difference of corners joined directly (100 = quarter)
 const double ANCHOR_TIE = 0.05;  // corners this close to an extreme are practically equal [m]
@@ -546,6 +548,67 @@ struct drawn_walls {
   }
 };
 
+// Outlines of the extended elevation scraps, in extended coordinates (x along
+// the extended elevation, y = height), and the scraps in which each station is drawn.
+struct drawn_elevation {
+  std::vector<std::vector<ring2>> rings;
+  std::map<size_t, std::vector<size_t>> station_scraps;
+
+  void collect(thdatabase * db) {
+    thdb2dprjpr prjid = db->db2d.parse_projection("extended", false);
+    if (prjid.newprj) return;
+    db->db2d.process_projection(prjid.prj);
+    for (thscrap * cs = prjid.prj->first_scrap; cs != NULL; cs = cs->proj_next_scrap) {
+      if (!cs->fsptr->is_selected()) continue;
+      thscrapis is(cs);
+      is.outline_scan(cs->get_outline());
+      std::vector<ring2> rr;
+      double sx = cs->proj->shift_x, sz = cs->proj->shift_z;
+      for (thscrapisolpt * ol = is.firstolseg; ol != NULL; ol = ol->next_segment) {
+        ring2 r;
+        for (thscrapisolpt * p = ol; p != NULL; p = p->next) r.push_back({p->x + sx, p->y + sz});
+        if (r.size() >= 3) rr.push_back(r);
+      }
+      if (rr.empty()) continue;
+      size_t si = rings.size();
+      rings.push_back(rr);
+      for (th2ddataobject * o2 = cs->fs2doptr; o2 != NULL; o2 = o2->nscrapoptr) {
+        if (o2->get_class_id() != TT_POINT_CMD) continue;
+        thpoint * pp = dynamic_cast<thpoint*>(o2);
+        if (pp->station_name.id == 0) continue;
+        size_t k = db->db1d.station_vec[pp->station_name.id - 1].uid - 1;
+        std::vector<size_t> & v = station_scraps[k];
+        if (std::find(v.begin(), v.end(), si) == v.end()) v.push_back(si);
+      }
+    }
+  }
+
+  // the drawn span (floor, roof) at x containing height z, or the nearest within ELEVATION_NEAR
+  bool span(const std::vector<size_t> & scraps, double x, double z, double & floor, double & roof) const {
+    double best = -1.0;
+    for (size_t si : scraps) {
+      std::vector<double> ys;
+      for (const ring2 & r : rings[si])
+        for (size_t k = 0, n = r.size(); k < n; k++) {
+          const auto & a = r[k], & b = r[(k + 1) % n];
+          if (((a[0] - x) * (b[0] - x) > 0.0) || (a[0] == b[0])) continue;
+          if (b[0] == x) continue;  // count a vertex once
+          ys.push_back(a[1] + (x - a[0]) / (b[0] - a[0]) * (b[1] - a[1]));
+        }
+      std::sort(ys.begin(), ys.end());
+      for (size_t k = 0; k + 1 < ys.size(); k += 2) {
+        double d = (z < ys[k]) ? ys[k] - z : ((z > ys[k + 1]) ? z - ys[k + 1] : 0.0);
+        if ((d <= ELEVATION_NEAR) && ((best < 0.0) || (d < best))) {
+          best = d;
+          floor = ys[k];
+          roof = ys[k + 1];
+        }
+      }
+    }
+    return best >= 0.0;
+  }
+};
+
 // Body around a station from its splays: the hull of the splay directions
 // with corners at the true splay ends (as therion's splay walls, but without legs).
 bool splay_body(const lxVec & c, const std::vector<lxVec> & splays, thdb3ddata & out) {
@@ -597,6 +660,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   std::string report, outside_report;
   drawn_walls drawn;
   drawn.collect(db);
+  drawn_elevation elev;
+  elev.collect(db);
 
   // centreline neighbours of each station (cave legs only)
   for (size_t i = 0; i < nst; i++) {
@@ -858,6 +923,54 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       stretchreport += fmt::format("{:>30}  right x{:.2f} ({:.2f} -> {:.2f} m)  left x{:.2f} ({:.2f} -> {:.2f} m)\n",
         where, fr, R, dr, fl, L, dl);
   };
+  // Roof and floor from the extended elevation at fraction f along the leg from
+  // station i to j: the leg's position along the extended elevation, in the
+  // scraps drawing both its stations (else either); steep or hidden legs are skipped.
+  size_t nvscaled = 0;
+  std::string vreport;
+  auto leg_elevation = [&](size_t i, size_t j, double f, double & floor, double & roof) {
+    if (elev.rings.empty()) return false;
+    for (thdb1d_tree_arrow * ar = nodes[i].first_arrow; ar != NULL; ar = ar->next_arrow) {
+      thdataleg * l = ar->leg->leg;
+      if (((l->flags & (TT_LEGFLAG_SPLAY | TT_LEGFLAG_SURFACE)) != 0) || (ar->end_node->uid - 1 != j)) continue;
+      if ((l->extend & TT_EXTENDFLAG_HIDE) != 0) return false;
+      thdb1ds & si = d1.station_vec[i], & sj = d1.station_vec[j];
+      double hl = std::hypot(sj.x - si.x, sj.y - si.y), dz = sj.z - si.z;
+      if (deg(atan2(std::fabs(dz), hl)) > ELEVATION_STEEP) return false;
+      double xi = ar->is_reversed ? l->txx : l->fxx, xj = ar->is_reversed ? l->fxx : l->txx;
+      std::vector<size_t> both, either;
+      auto ii = elev.station_scraps.find(i), jj = elev.station_scraps.find(j);
+      if (ii != elev.station_scraps.end())
+        for (size_t s1 : ii->second) {
+          either.push_back(s1);
+          if ((jj != elev.station_scraps.end()) && (std::find(jj->second.begin(), jj->second.end(), s1) != jj->second.end()))
+            both.push_back(s1);
+        }
+      if (jj != elev.station_scraps.end())
+        for (size_t s2 : jj->second)
+          if (std::find(either.begin(), either.end(), s2) == either.end()) either.push_back(s2);
+      double x = xi + f * (xj - xi), z = si.z + f * dz;
+      if (!both.empty() && elev.span(both, x, z, floor, roof)) return true;
+      return elev.span(either, x, z, floor, roof);
+    }
+    return false;
+  };
+  auto station_elevation = [&](size_t i, double & floor, double & roof) {
+    for (size_t k : nbrs[i])
+      if (leg_elevation(i, k, 0.0, floor, roof)) return true;
+    return false;
+  };
+  // scales a ring vertically so that its top meets the drawn roof and its bottom the drawn floor
+  auto vstretch = [&](std::vector<lxVec> & P, double floor, double roof, const std::string & where) {
+    double top = -1e99, bot = 1e99;
+    for (const lxVec & p : P) { top = std::max(top, p.z); bot = std::min(bot, p.z); }
+    if ((top - bot < 0.1) || (roof - floor < 0.1)) return;
+    double fac = (roof - floor) / (top - bot);
+    for (lxVec & p : P) p.z = floor + (p.z - bot) * fac;
+    nvscaled++;
+    if ((fac > STRETCH_REPORT) || (fac < 1.0 / STRETCH_REPORT))
+      vreport += fmt::format("{:>30}  height x{:.2f} ({:.2f} -> {:.2f} m)\n", where, fac, top - bot, roof - floor);
+  };
   auto ring = [&](const std::vector<lxVec> & P) {
     std::vector<thdb3dvx *> r;
     for (const lxVec & p : P) r.push_back(map_tubes.insert_vertex(p));
@@ -870,7 +983,10 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   auto station_ring = [&](size_t i) {  // a station section stretched to the drawn walls
     std::vector<lxVec> P;
     for (size_t k = 0; k < sec[i].q.size(); k++) P.push_back(sec[i].point(k));
-    stretch(P, sec[i].c, horizontal(sec[i].u), fmt::format("{}@{}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name));
+    std::string where = fmt::format("{}@{}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name);
+    stretch(P, sec[i].c, horizontal(sec[i].u), where);
+    double ef, er;
+    if (station_elevation(i, ef, er)) vstretch(P, ef, er, where);
     return P;
   };
   // branches ending at junctions: end position, across direction, end ring
@@ -935,7 +1051,10 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
             if (w0 && drawn.width(c.x, c.y, h, wr, wl) && (wr + wl > BRANCH_OPENING * (w0r + w0l))) break;
             std::vector<lxVec> P;
             for (size_t k = 0; k < a.q.size(); k++) P.push_back(a.point(k) + (c - a.c));
-            stretch(P, c, h, fmt::format("{}@{} -> {}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name, e.name));
+            std::string where = fmt::format("{}@{} -> {}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name, e.name);
+            stretch(P, c, h, where);
+            double ef, er;
+            if (leg_elevation(i, j, f, ef, er)) vstretch(P, ef, er, where);
             std::vector<thdb3dvx *> cur = ring(P);
             loft(prev, cur);
             prev = cur;
@@ -1099,8 +1218,13 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
             P.push_back((1.0 - f) * ra[k]->get_vector() + f * rb[k]->get_vector());
           lxVec c = (1.0 - f) * a.c + f * b.c, h = (1.0 - f) * ha + f * hb;
           h = horizontal(h);
-          stretch(P, c, h, fmt::format("{}@{} - {} {:.0f}%", d1.station_vec[i].name,
-            d1.station_vec[i].survey->full_name, d1.station_vec[j].name, 100.0 * f));
+          std::string where = fmt::format("{}@{} - {} {:.0f}%", d1.station_vec[i].name,
+            d1.station_vec[i].survey->full_name, d1.station_vec[j].name, 100.0 * f);
+          stretch(P, c, h, where);
+          double ef, er;
+          bool ok = (m == 0) ? station_elevation(i, ef, er) : ((m == nseg) ? station_elevation(j, ef, er)
+            : leg_elevation(i, j, f, ef, er));
+          if (ok) vstretch(P, ef, er, where);
           std::vector<thdb3dvx *> cur = ring(P);
           if (m > 0) loft(prev, cur);
           prev = cur;
@@ -1438,6 +1562,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   if (usemap) {
     thlog(fmt::format("\nModel from maps and sections: {} sections stretched to the drawn walls ({} rings, every {:.1f} m).\n",
       nstretched, nrings, MAP_SPACING));
+    thlog(fmt::format("Rings scaled to the extended elevation: {} ({} extended scraps).\n", nvscaled, elev.rings.size()));
+    if (!vreport.empty())
+      thlog(fmt::format("Height scaled by more than {:.1f} times (or less than 1/{:.1f}):\n{}", STRETCH_REPORT, STRETCH_REPORT, vreport));
     thlog(fmt::format("Branches joined to junction footprints from the drawn walls: {}; run into the junction and closed: {}.\n",
       [&]() { size_t n = 0; for (auto & bj : branch_ends) for (auto & be : bj.second) if (be.joined) n++; return n; }(), noverlap));
     if (!stretchreport.empty())
