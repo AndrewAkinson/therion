@@ -182,7 +182,11 @@ var root = new THREE.Group();
 scene.add(root);
 
 var groupNames = {'centreline': 'Centreline', 'splays': 'Splay shots', 'walls-maps': 'Walls from maps',
-  'walls-splays': 'Walls from splays', 'walls-centreline': 'Walls from LRUD'};
+  'walls-splays': 'Walls from splays', 'walls-centreline': 'Walls from LRUD',
+  'walls-splay-tubes': 'Tubes from section splays', 'section-splays': 'Section splays',
+  'section-polygons': 'Section polygons', 'walls-junctions': 'Junctions from splays'};
+// groups hidden when the page opens
+var hiddenGroups = ['section-polygons'];
 var groups = {}, order = [];
 (gltf.nodes || []).forEach(function (node) {
   var mesh = gltf.meshes[node.mesh], p = mesh.primitives[0];
@@ -208,7 +212,7 @@ var groups = {}, order = [];
 // group switches
 var gdiv = document.getElementById('groups'), switches = {};
 order.forEach(function (g) {
-  var on = !(g === 'walls-splays' && groups['walls-maps']);
+  var on = !(g === 'walls-splays' && groups['walls-maps']) && (hiddenGroups.indexOf(g) < 0);
   groups[g].forEach(function (o) { o.visible = on; });
   var l = document.createElement('label'), cb = document.createElement('input');
   cb.type = 'checkbox'; cb.checked = on;
