@@ -64,6 +64,8 @@ const double BRANCH_END = 1.0;  // and at the latest this far before the junctio
 const double BRANCH_OVERLAP = 0.5;  // a branch that cannot be joined to its junction runs this far into it [m]
 const double ELEVATION_NEAR = 0.5;  // a leg outside the drawn elevation by up to this uses the nearest span [m]
 const double ELEVATION_STEEP = 60.0;  // steeper legs are not scaled to the extended elevation [deg]
+const int OVAL_POINTS = 24;  // points round an oval section of a leg without splay sections
+const double OVAL_END = 1.0;  // an oval leg starts this far from a junction [m] (at most half the leg)
 const double STRETCH_REPORT = 2.0;  // stretches by more than this factor are reported
 const double PAIR_TOLERANCE = 20.0;  // max. position difference of corners joined directly (100 = quarter)
 const double ANCHOR_TIE = 0.05;  // corners this close to an extreme are practically equal [m]
@@ -1022,7 +1024,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     std::vector<lxVec> P;
     std::vector<thdb3dvx *> vx;
     bool joined;
-    size_t sec;
+    size_t sec;  // the branch's station (a section, or the far end of an oval leg)
+    bool oval;  // an oval leg: closed by a fan, not as a section
   };
   std::map<size_t, std::vector<branch_end>> branch_ends;
 
@@ -1109,7 +1112,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
             prev[k]->z = v.z;
             Pend[k] = v;
           }
-          branch_ends[j].push_back({cend, h, Pend, prev, false, i});
+          branch_ends[j].push_back({cend, h, Pend, prev, false, i, false});
         }
         a.ntubes++;
         nextended++;
@@ -1272,6 +1275,116 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       a.ntubes++;
       b.ntubes++;
       ntubes++;
+    }
+  }
+
+  // Legs with no section at either end (dead ends without splays, chains of
+  // stations without sections), where drawn: at each position the LRUD from the
+  // drawings (left and right to the plan walls, up and down to the extended
+  // elevation's roof and floor) gives an oval section, each quarter an ellipse;
+  // with only one of the drawings, a circle. From a junction (or station without
+  // a section) the oval leg starts OVAL_END away and joins its footprint; at a
+  // dead end it is rounded off to the drawn end wall.
+  size_t novallegs = 0, novalrings = 0;
+  for (size_t i = 0; (i < nst) && usemap; i++) {
+    thdb1ds & si = d1.station_vec[i];
+    if ((si.uid != i + 1) || si.is_temporary() || !si.survey->is_selected() || sec[i].ok) continue;
+    for (size_t j : nbrs[i]) {
+      if ((j <= i) || sec[j].ok) continue;
+      thdb1ds & sj = d1.station_vec[j];
+      lxVec ci(si.x, si.y, si.z), cj(sj.x, sj.y, sj.z), dir(cj.x - ci.x, cj.y - ci.y, 0.0);
+      double len = dir.Length();
+      if (len < 0.1) continue;
+      dir = dir / len;
+      lxVec h(dir.y, -dir.x, 0.0);  // right, looking from i to j
+      double f0 = body[i] ? std::min(OVAL_END / len, 0.5) : 0.0, f1 = body[j] ? 1.0 - std::min(OVAL_END / len, 0.5) : 1.0;
+      if (f1 - f0 < 1e-3) continue;
+      auto lrud = [&](double f, double & l, double & r, double & u, double & d, bool & horiz, bool & vert) {
+        lxVec c = ci + f * (cj - ci);
+        double fl, rf;
+        horiz = drawn.width(c.x, c.y, h, r, l);
+        vert = leg_elevation(i, j, f, fl, rf);
+        if (vert) {
+          u = std::max(0.05, rf - c.z);
+          d = std::max(0.05, c.z - fl);
+        }
+        return horiz || vert;
+      };
+      // oval ring at fraction f, or empty where nothing is drawn
+      auto oval = [&](double f) {
+        std::vector<lxVec> P;
+        double l = 0, r = 0, u = 0, d = 0;
+        bool horiz, vert;
+        if (!lrud(f, l, r, u, d, horiz, vert)) return P;
+        lxVec c = ci + f * (cj - ci);
+        double ox = 0.0, oz = 0.0;
+        if (!horiz) { double rr = 0.5 * (u + d); oz = 0.5 * (u - d); l = r = u = d = rr; }
+        else if (!vert) { double rr = 0.5 * (l + r); ox = 0.5 * (r - l); l = r = u = d = rr; }
+        for (int k = 0; k < OVAL_POINTS; k++) {
+          double a = 2.0 * M_PI * k / OVAL_POINTS, ca = cos(a), sa = sin(a);
+          P.push_back(c + (ox + ca * ((ca > 0.0) ? r : l)) * h + lxVec(0.0, 0.0, oz + sa * ((sa > 0.0) ? u : d)));
+        }
+        return P;
+      };
+      std::vector<double> fs = positions(len * (f1 - f0), 1.0, [&](double g) {
+        double l = 0, r = 0, u = 0, d = 0;
+        bool horiz, vert;
+        double f = f0 + g * (f1 - f0);
+        if (!lrud(f, l, r, u, d, horiz, vert)) return lxVec(-1.0, -1.0, 0.0);
+        return lxVec(horiz ? l + r : -1.0, vert ? u + d : -1.0, 0.0);
+      });
+      std::vector<thdb3dvx *> prev, first;
+      std::vector<lxVec> Pfirst, Plast;
+      double ffirst = -1.0, flast = -1.0;
+      for (double g : fs) {
+        double f = f0 + g * (f1 - f0);
+        std::vector<lxVec> P = oval(f);
+        if (P.empty()) continue;  // not drawn here
+        std::vector<thdb3dvx *> cur = ring(P);
+        novalrings++;
+        if (!prev.empty()) loft(prev, cur);
+        else { first = cur; Pfirst = P; ffirst = f; }
+        prev = cur;
+        Plast = P;
+        flast = f;
+      }
+      if (prev.empty()) continue;
+      novallegs++;
+      // ends: join a junction footprint, or round off a dead end to the drawn end wall
+      auto close_end = [&](const std::vector<thdb3dvx *> & r, const std::vector<lxVec> & P, double f, bool at_j) {
+        size_t st_end = at_j ? j : i, st_other = at_j ? i : j;
+        lxVec c = ci + f * (cj - ci), out = at_j ? dir : -1.0 * dir;
+        if (body[st_end]) {
+          branch_ends[st_end].push_back({c, at_j ? h : -1.0 * h, P, r, false, st_other, true});
+          return;
+        }
+        double wall = -1.0;
+        for (size_t si2 = 0; si2 < drawn.scraps.size(); si2++) {
+          if (!drawn.inside(si2, c.x, c.y)) continue;
+          double t = drawn.ray(si2, c.x, c.y, out.x, out.y);
+          if ((t > 0.0) && ((wall < 0.0) || (t < wall))) wall = t;
+        }
+        lxVec cc = centroid(r);
+        std::vector<thdb3dvx *> rr = r;
+        if (wall > 0.05) {  // half an ellipsoid out to the end wall
+          for (int k = 1; k < 4; k++) {
+            double t = k / 4.0, sc = std::sqrt(1.0 - t * t);
+            std::vector<lxVec> Q;
+            for (const lxVec & p : P) Q.push_back(cc + sc * (p - cc) + (t * wall) * out);
+            std::vector<thdb3dvx *> nr = ring(Q);
+            loft(rr, nr);
+            rr = nr;
+          }
+          taper_ring(map_tubes.insert_face(THDB3DFC_TRIANGLES), rr, map_tubes.insert_vertex(cc + wall * out));
+        } else {
+          piece pc;
+          thdb3dvx * cv = map_tubes.insert_vertex(cc);
+          for (size_t k = 0; k < rr.size(); k++) pc.add(cv, rr[(k + 1) % rr.size()], rr[k], out);
+          pc.emit(map_tubes.insert_face(THDB3DFC_TRIANGLES));
+        }
+      };
+      close_end(first, Pfirst, ffirst, false);
+      close_end(prev, Plast, flast, true);
     }
   }
 
@@ -1594,7 +1707,12 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       for (lxVec & p : P) p += BRANCH_OVERLAP * dir;
       std::vector<thdb3dvx *> cur = ring(P);
       loft(be.vx, cur);
-      if (cap(sec[be.sec], cur, map_tubes.insert_vertex(be.c + BRANCH_OVERLAP * dir), map_tubes, dir)) ncaps++; else nfans++;
+      if (be.oval) {
+        piece pc;
+        thdb3dvx * cv = map_tubes.insert_vertex(be.c + BRANCH_OVERLAP * dir);
+        for (size_t k = 0; k < cur.size(); k++) pc.add(cv, cur[(k + 1) % cur.size()], cur[k], dir);
+        pc.emit(map_tubes.insert_face(THDB3DFC_TRIANGLES));
+      } else if (cap(sec[be.sec], cur, map_tubes.insert_vertex(be.c + BRANCH_OVERLAP * dir), map_tubes, dir)) ncaps++; else nfans++;
       noverlap++;
     }
 
@@ -1603,6 +1721,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       "a section wherever the drawn width or height changes by more than {:.0f}%, {:.2f} to {:.2f} m apart).\n",
       nstretched, nrings, nlegspaced, thsplaytube_opt.spacing_change, thsplaytube_opt.spacing_min, thsplaytube_opt.spacing_max));
     thlog(fmt::format("Rings scaled to the extended elevation: {} ({} extended scraps).\n", nvscaled, elev.rings.size()));
+    thlog(fmt::format("Legs without sections drawn as ovals from the drawn LRUD: {} ({} rings).\n", novallegs, novalrings));
     if (!vreport.empty())
       thlog(fmt::format("Height scaled by more than {:.1f} times (or less than 1/{:.1f}):\n{}", STRETCH_REPORT, STRETCH_REPORT, vreport));
     thlog(fmt::format("Branches joined to junction footprints from the drawn walls: {}; run into the junction and closed: {}.\n",
