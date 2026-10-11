@@ -586,6 +586,23 @@ struct drawn_elevation {
     }
   }
 
+  // all drawn spans (floor, roof) at x
+  std::vector<std::pair<double, double>> spans(const std::vector<size_t> & scraps, double x) const {
+    std::vector<std::pair<double, double>> res;
+    for (size_t si : scraps) {
+      std::vector<double> ys;
+      for (const ring2 & r : rings[si])
+        for (size_t k = 0, n = r.size(); k < n; k++) {
+          const auto & a = r[k], & b = r[(k + 1) % n];
+          if (((a[0] - x) * (b[0] - x) > 0.0) || (a[0] == b[0]) || (b[0] == x)) continue;
+          ys.push_back(a[1] + (x - a[0]) / (b[0] - a[0]) * (b[1] - a[1]));
+        }
+      std::sort(ys.begin(), ys.end());
+      for (size_t k = 0; k + 1 < ys.size(); k += 2) res.push_back(std::make_pair(ys[k], ys[k + 1]));
+    }
+    return res;
+  }
+
   // the drawn span (floor, roof) at x containing height z, or the nearest within ELEVATION_NEAR
   bool span(const std::vector<size_t> & scraps, double x, double z, double & floor, double & roof) const {
     double best = -1.0;
@@ -931,6 +948,81 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   // scraps drawing both its stations (else either); steep or hidden legs are skipped.
   size_t nvscaled = 0;
   std::string vreport;
+  // the leg's position along the extended elevation at f, its height, and the
+  // scraps to use (both stations' scraps if any, else either's)
+  auto leg_ext = [&](size_t i, size_t j, double f, double & x, double & z,
+                     std::vector<size_t> & both, std::vector<size_t> & either) {
+    if (elev.rings.empty()) return false;
+    for (thdb1d_tree_arrow * ar = nodes[i].first_arrow; ar != NULL; ar = ar->next_arrow) {
+      thdataleg * l = ar->leg->leg;
+      if (((l->flags & (TT_LEGFLAG_SPLAY | TT_LEGFLAG_SURFACE)) != 0) || (ar->end_node->uid - 1 != j)) continue;
+      if ((l->extend & TT_EXTENDFLAG_HIDE) != 0) return false;
+      thdb1ds & si = d1.station_vec[i], & sj = d1.station_vec[j];
+      double hl = std::hypot(sj.x - si.x, sj.y - si.y), dz = sj.z - si.z;
+      if (deg(atan2(std::fabs(dz), hl)) > ELEVATION_STEEP) return false;
+      double xi = ar->is_reversed ? l->txx : l->fxx, xj = ar->is_reversed ? l->fxx : l->txx;
+      both.clear();
+      either.clear();
+      auto ii = elev.station_scraps.find(i), jj = elev.station_scraps.find(j);
+      if (ii != elev.station_scraps.end())
+        for (size_t s1 : ii->second) {
+          either.push_back(s1);
+          if ((jj != elev.station_scraps.end()) && (std::find(jj->second.begin(), jj->second.end(), s1) != jj->second.end()))
+            both.push_back(s1);
+        }
+      if (jj != elev.station_scraps.end())
+        for (size_t s2 : jj->second)
+          if (std::find(either.begin(), either.end(), s2) == either.end()) either.push_back(s2);
+      x = xi + f * (xj - xi);
+      z = si.z + f * dz;
+      return true;
+    }
+    return false;
+  };
+  // all drawn spans at f along the leg, relative to the leg's height (up, down)
+  auto leg_spans = [&](size_t i, size_t j, double f, std::vector<std::pair<double, double>> & ud) {
+    double x, z;
+    std::vector<size_t> both, either;
+    ud.clear();
+    if (!leg_ext(i, j, f, x, z, both, either)) return false;
+    std::vector<std::pair<double, double>> sp = elev.spans(both, x);
+    if (sp.empty()) sp = elev.spans(either, x);
+    for (auto & p : sp) ud.push_back(std::make_pair(p.second - z, z - p.first));
+    return !ud.empty();
+  };
+  // Up and down along a leg from the extended elevation, in the given order of
+  // positions: the first takes the span containing the leg (or the nearest within
+  // ELEVATION_NEAR); each next one the span continuing from the previous (most
+  // overlap); where the height would change by more than BRANCH_OPENING times
+  // from one position to the next, the previous up and down are kept.
+  auto track_elevation = [&](size_t i, size_t j, const std::vector<double> & fs, const std::vector<size_t> & order,
+                             std::vector<double> & up, std::vector<double> & down, std::vector<char> & ok) {
+    up.assign(fs.size(), 0.0);
+    down.assign(fs.size(), 0.0);
+    ok.assign(fs.size(), 0);
+    bool have = false;
+    double pu = 0.0, pd = 0.0;
+    for (size_t k : order) {
+      std::vector<std::pair<double, double>> ud;
+      if (!leg_spans(i, j, fs[k], ud)) continue;
+      double bu = 0.0, bd = 0.0, best = -1e99;
+      for (auto & c : ud) {
+        double score;
+        if (have) score = std::min(c.first, pu) + std::min(c.second, pd);  // overlap with the previous span
+        else score = -((c.first < 0.0) ? -c.first : ((c.second < 0.0) ? -c.second : 0.0));  // contains the leg
+        if (score > best) { best = score; bu = c.first; bd = c.second; }
+      }
+      if (!have && (best < -ELEVATION_NEAR)) continue;
+      if (have && (best <= 0.0)) { bu = pu; bd = pd; }  // nothing continues: keep the previous
+      if (have && ((bu + bd > BRANCH_OPENING * (pu + pd)) || (BRANCH_OPENING * (bu + bd) < pu + pd))) { bu = pu; bd = pd; }
+      up[k] = bu;
+      down[k] = bd;
+      ok[k] = 1;
+      pu = bu;
+      pd = bd;
+      have = true;
+    }
+  };
   auto leg_elevation = [&](size_t i, size_t j, double f, double & floor, double & roof) {
     if (elev.rings.empty()) return false;
     for (thdb1d_tree_arrow * ar = nodes[i].first_arrow; ar != NULL; ar = ar->next_arrow) {
@@ -1080,6 +1172,12 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
               leg_elevation(i, j, f, ef, er) ? er - ef : -1.0, 0.0);
           });
           nlegspaced++;
+          // up and down followed from the station towards the junction
+          std::vector<size_t> bord;
+          for (size_t m = 0; m < fs.size(); m++) bord.push_back(m);
+          std::vector<double> bup, bdown;
+          std::vector<char> bok;
+          track_elevation(i, j, fs, bord, bup, bdown, bok);
           for (size_t m = 1; (m < fs.size()) && (fmax > 0.0); m++) {
             double f = fs[m];
             lxVec c = a.c + f * (cj - a.c);
@@ -1088,8 +1186,10 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
             for (size_t k = 0; k < a.q.size(); k++) P.push_back(a.point(k) + (c - a.c));
             std::string where = fmt::format("{}@{} -> {}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name, e.name);
             stretch(P, c, h, where);
-            double ef, er;
-            if (leg_elevation(i, j, f, ef, er)) vstretch(P, ef, er, where);
+            if (bok[m]) {
+              double z = d1.station_vec[i].z + f * (e.z - d1.station_vec[i].z);
+              vstretch(P, z - bdown[m], z + bup[m], where);
+            }
             std::vector<thdb3dvx *> cur = ring(P);
             loft(prev, cur);
             prev = cur;
@@ -1286,6 +1386,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   // a section) the oval leg starts OVAL_END away and joins its footprint; at a
   // dead end it is rounded off to the drawn end wall.
   size_t novallegs = 0, novalrings = 0;
+  std::vector<double> ovup, ovdown;
+  std::vector<char> ovok;
   for (size_t i = 0; (i < nst) && usemap; i++) {
     thdb1ds & si = d1.station_vec[i];
     if ((si.uid != i + 1) || si.is_temporary() || !si.survey->is_selected() || sec[i].ok) continue;
@@ -1297,48 +1399,88 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       if (len < 0.1) continue;
       dir = dir / len;
       lxVec h(dir.y, -dir.x, 0.0);  // right, looking from i to j
-      double f0 = body[i] ? std::min(OVAL_END / len, 0.5) : 0.0, f1 = body[j] ? 1.0 - std::min(OVAL_END / len, 0.5) : 1.0;
-      if (f1 - f0 < 1e-3) continue;
-      auto lrud = [&](double f, double & l, double & r, double & u, double & d, bool & horiz, bool & vert) {
-        lxVec c = ci + f * (cj - ci);
-        double fl, rf;
-        horiz = drawn.width(c.x, c.y, h, r, l);
-        vert = leg_elevation(i, j, f, fl, rf);
-        if (vert) {
-          u = std::max(0.05, rf - c.z);
-          d = std::max(0.05, c.z - fl);
+      // where the passage has settled, from a junction end: the first position
+      // (at least spacing_min from it, at most halfway) where the drawn width is
+      // no more than BRANCH_OPENING times the typical (median) width of the other
+      // half of the leg; without plan widths, OVAL_END from the junction
+      double fmin = std::min(std::max(0.05, thsplaytube_opt.spacing_min) / len, 0.5);
+      int nsmp = std::max(2, (int) ceil(len / std::max(0.05, thsplaytube_opt.spacing_min)));
+      std::vector<double> wsmp(nsmp + 1, -1.0);
+      for (int k = 0; k <= nsmp; k++) {
+        lxVec c = ci + (double(k) / nsmp) * (cj - ci);
+        double r1, l1;
+        if (drawn.width(c.x, c.y, h, r1, l1)) wsmp[k] = r1 + l1;
+      }
+      auto settle = [&](bool from_i) {
+        std::vector<double> far;
+        for (int k = 0; k <= nsmp; k++)
+          if ((wsmp[k] > 0.0) && (from_i ? (2 * k >= nsmp) : (2 * k <= nsmp))) far.push_back(wsmp[k]);
+        if (far.empty()) return std::min(OVAL_END / len, 0.5);
+        std::sort(far.begin(), far.end());
+        double ref = far[far.size() / 2];
+        for (int m = 0; 2 * m <= nsmp; m++) {
+          int k = from_i ? m : nsmp - m;
+          double fr = double(m) / nsmp;
+          if (fr < fmin) continue;
+          if ((wsmp[k] > 0.0) && (wsmp[k] <= BRANCH_OPENING * ref)) return fr;
         }
-        return horiz || vert;
+        return 0.5;
       };
-      // oval ring at fraction f, or empty where nothing is drawn
-      auto oval = [&](double f) {
-        std::vector<lxVec> P;
-        double l = 0, r = 0, u = 0, d = 0;
-        bool horiz, vert;
-        if (!lrud(f, l, r, u, d, horiz, vert)) return P;
+      double f0 = body[i] ? settle(true) : 0.0, f1 = body[j] ? 1.0 - settle(false) : 1.0;
+      if (f1 - f0 < 1e-3) continue;
+      std::vector<double> fs = positions(len * (f1 - f0), 1.0, [&](double g) {
+        double f = f0 + g * (f1 - f0), r1, l1, ef, er;
         lxVec c = ci + f * (cj - ci);
+        return lxVec(drawn.width(c.x, c.y, h, r1, l1) ? r1 + l1 : -1.0,
+          leg_elevation(i, j, f, ef, er) ? er - ef : -1.0, 0.0);
+      });
+      for (double & g : fs) g = f0 + g * (f1 - f0);
+      // up and down followed along the leg from the end that is not a junction
+      // (from the middle if both or neither are)
+      size_t nf = fs.size();
+      std::vector<size_t> fwd, back;
+      if (body[i] && !body[j]) {
+        for (size_t k = nf; k > 0; k--) back.push_back(k - 1);
+      } else if (!body[i] && body[j]) {
+        for (size_t k = 0; k < nf; k++) fwd.push_back(k);
+      } else {
+        for (size_t k = nf / 2; k < nf; k++) fwd.push_back(k);
+        for (size_t k = nf / 2 + 1; k > 0; k--) back.push_back(k - 1);
+      }
+      ovup.assign(nf, 0.0);
+      ovdown.assign(nf, 0.0);
+      ovok.assign(nf, 0);
+      for (const std::vector<size_t> * od : {&back, &fwd}) {
+        if (od->empty()) continue;
+        std::vector<double> tu, td;
+        std::vector<char> tok;
+        track_elevation(i, j, fs, *od, tu, td, tok);
+        for (size_t k : *od) { ovup[k] = tu[k]; ovdown[k] = td[k]; ovok[k] = tok[k]; }
+      }
+      // oval ring at position k, or empty where nothing is drawn
+      auto oval = [&](size_t k) {
+        std::vector<lxVec> P;
+        double f = fs[k], l = 0, r = 0, u = ovup[k], d = ovdown[k];
+        lxVec c = ci + f * (cj - ci);
+        bool horiz = drawn.width(c.x, c.y, h, r, l), vert = ovok[k];
+        if (!horiz && !vert) return P;
+        u = std::max(0.05, u);
+        d = std::max(0.05, d);
         double ox = 0.0, oz = 0.0;
         if (!horiz) { double rr = 0.5 * (u + d); oz = 0.5 * (u - d); l = r = u = d = rr; }
         else if (!vert) { double rr = 0.5 * (l + r); ox = 0.5 * (r - l); l = r = u = d = rr; }
-        for (int k = 0; k < OVAL_POINTS; k++) {
-          double a = 2.0 * M_PI * k / OVAL_POINTS, ca = cos(a), sa = sin(a);
+        for (int q = 0; q < OVAL_POINTS; q++) {
+          double a = 2.0 * M_PI * q / OVAL_POINTS, ca = cos(a), sa = sin(a);
           P.push_back(c + (ox + ca * ((ca > 0.0) ? r : l)) * h + lxVec(0.0, 0.0, oz + sa * ((sa > 0.0) ? u : d)));
         }
         return P;
       };
-      std::vector<double> fs = positions(len * (f1 - f0), 1.0, [&](double g) {
-        double l = 0, r = 0, u = 0, d = 0;
-        bool horiz, vert;
-        double f = f0 + g * (f1 - f0);
-        if (!lrud(f, l, r, u, d, horiz, vert)) return lxVec(-1.0, -1.0, 0.0);
-        return lxVec(horiz ? l + r : -1.0, vert ? u + d : -1.0, 0.0);
-      });
       std::vector<thdb3dvx *> prev, first;
       std::vector<lxVec> Pfirst, Plast;
       double ffirst = -1.0, flast = -1.0;
-      for (double g : fs) {
-        double f = f0 + g * (f1 - f0);
-        std::vector<lxVec> P = oval(f);
+      for (size_t k = 0; k < nf; k++) {
+        double f = fs[k];
+        std::vector<lxVec> P = oval(k);
         if (P.empty()) continue;  // not drawn here
         std::vector<thdb3dvx *> cur = ring(P);
         novalrings++;
