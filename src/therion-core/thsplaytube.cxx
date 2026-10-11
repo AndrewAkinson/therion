@@ -307,10 +307,83 @@ double cross2(double ax, double ay, double bx, double by) {
   return ax * by - ay * bx;
 }
 
+// Adds triangle a, b, c to the face, ordered so that it faces along out
+// (outwards), so that viewers light and show all faces correctly.
+void tri(thdb3dfc * fc, thdb3dvx * a, thdb3dvx * b, thdb3dvx * c, const lxVec & out) {
+  lxVec n = (b->get_vector() - a->get_vector()) ^ (c->get_vector() - a->get_vector());
+  fc->insert_vertex(a);
+  if (n * out >= 0.0) {
+    fc->insert_vertex(b);
+    fc->insert_vertex(c);
+  } else {
+    fc->insert_vertex(c);
+    fc->insert_vertex(b);
+  }
+}
+
+// Triangles of one piece of surface (built as one strip or fan, so all
+// ordered the same way): they all get the order that most of them, weighted by
+// size, need to face outwards.
+struct piece {
+  std::vector<std::array<thdb3dvx *, 3>> t;
+  double vote = 0.0;
+  void add(thdb3dvx * a, thdb3dvx * b, thdb3dvx * c, const lxVec & out) {
+    lxVec n = (b->get_vector() - a->get_vector()) ^ (c->get_vector() - a->get_vector());
+    vote += n * out;
+    t.push_back({a, b, c});
+  }
+  void emit(thdb3dfc * fc) {
+    bool flip = (vote < 0.0);
+    for (const auto & x : t) {
+      fc->insert_vertex(x[0]);
+      fc->insert_vertex(flip ? x[2] : x[1]);
+      fc->insert_vertex(flip ? x[1] : x[2]);
+    }
+  }
+};
+
+lxVec centroid(const std::vector<thdb3dvx *> & r) {
+  lxVec c(0.0, 0.0, 0.0);
+  for (thdb3dvx * v : r) c += v->get_vector();
+  return (r.empty()) ? c : c / double(r.size());
+}
+
+// Joins two rings with corresponding vertices by triangles facing away from
+// the line through their centres.
+void loft_rings(thdb3dfc * fc, const std::vector<thdb3dvx *> & ra, const std::vector<thdb3dvx *> & rb) {
+  lxVec ca = centroid(ra), cb = centroid(rb), axis = cb - ca;
+  double al = axis.Length();
+  if (al > 1e-9) axis = axis / al;
+  size_t nv = std::min(ra.size(), rb.size());
+  piece pc;
+  for (size_t k = 0; k < nv; k++) {
+    size_t k1 = (k + 1) % nv;
+    lxVec m = 0.25 * (ra[k]->get_vector() + ra[k1]->get_vector() + rb[k1]->get_vector() + rb[k]->get_vector());
+    lxVec out = m - (ca + ((m - ca) * axis) * axis);
+    pc.add(ra[k], ra[k1], rb[k1], out);
+    pc.add(ra[k], rb[k1], rb[k], out);
+  }
+  pc.emit(fc);
+}
+
+// Joins a ring to a point (a passage end) by triangles facing away from the line ring centre - point.
+void taper_ring(thdb3dfc * fc, const std::vector<thdb3dvx *> & r, thdb3dvx * end) {
+  lxVec c = centroid(r), axis = end->get_vector() - c;
+  double al = axis.Length();
+  if (al > 1e-9) axis = axis / al;
+  piece pc;
+  for (size_t k = 0, nv = r.size(); k < nv; k++) {
+    lxVec m = (r[k]->get_vector() + r[(k + 1) % nv]->get_vector() + end->get_vector()) / 3.0;
+    pc.add(r[k], r[(k + 1) % nv], end, m - (c + ((m - c) * axis) * axis));
+  }
+  pc.emit(fc);
+}
+
 // Closes a tube end: triangulates the section polygon (any shape) with the
 // given vertices for its corners. Falls back to a fan from the station, which
 // sees every corner of a polygon made of its splays.
-bool cap(const section & s, const std::vector<thdb3dvx *> & ring, thdb3dvx * station, thdb3ddata & out) {
+bool cap(const section & s, const std::vector<thdb3dvx *> & ring, thdb3dvx * station, thdb3ddata & out,
+  const lxVec & outward) {
   std::vector<std::unique_ptr<p2t::Point>> holder;
   std::vector<p2t::Point *> line;
   std::map<p2t::Point *, thdb3dvx *> vmap;
@@ -328,9 +401,10 @@ bool cap(const section & s, const std::vector<thdb3dvx *> & ring, thdb3dvx * sta
     try {
       p2t::CDT cdt(line);
       cdt.Triangulate();
+      piece pc;
       for (p2t::Triangle * t : cdt.GetTriangles())
-        for (int k = 0; k < 3; k++)
-          fc->insert_vertex(vmap.at(t->GetPoint(k)));
+        pc.add(vmap.at(t->GetPoint(0)), vmap.at(t->GetPoint(1)), vmap.at(t->GetPoint(2)), outward);
+      pc.emit(fc);
       done = true;
     } catch (...) {
       done = false;
@@ -338,11 +412,10 @@ bool cap(const section & s, const std::vector<thdb3dvx *> & ring, thdb3dvx * sta
   }
   if (!done) {
     size_t nv = ring.size();
-    for (size_t k = 0; k < nv; k++) {
-      fc->insert_vertex(station);
-      fc->insert_vertex(ring[(k + 1) % nv]);
-      fc->insert_vertex(ring[k]);
-    }
+    piece pc;
+    for (size_t k = 0; k < nv; k++)
+      pc.add(station, ring[(k + 1) % nv], ring[k], outward);
+    pc.emit(fc);
   }
   return done;
 }
@@ -493,10 +566,14 @@ bool splay_body(const lxVec & c, const std::vector<lxVec> & splays, thdb3ddata &
   if (idx.size() < 3) return false;
   std::vector<thdb3dvx *> vx(ends.size(), nullptr);
   thdb3dfc * fc = out.insert_face(THDB3DFC_TRIANGLES);
-  for (size_t k = 0; k < idx.size(); k++) {
+  for (size_t k = 0; k < idx.size(); k++)
     if (vx[idx[k]] == nullptr) vx[idx[k]] = out.insert_vertex(ends[idx[k]]);
-    fc->insert_vertex(vx[idx[k]]);
+  piece pc;  // the hull is ordered consistently; turn it outwards as a whole
+  for (size_t k = 0; k + 2 < idx.size(); k += 3) {
+    lxVec m = (ends[idx[k]] + ends[idx[k + 1]] + ends[idx[k + 2]]) / 3.0;
+    pc.add(vx[idx[k]], vx[idx[k + 1]], vx[idx[k + 2]], m - c);
   }
+  pc.emit(fc);
   return true;
 }
 
@@ -788,17 +865,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     return r;
   };
   auto loft = [&](const std::vector<thdb3dvx *> & ra, const std::vector<thdb3dvx *> & rb) {
-    thdb3dfc * fc = map_tubes.insert_face(THDB3DFC_TRIANGLES);
-    size_t nv = ra.size();
-    for (size_t k = 0; k < nv; k++) {
-      size_t k1 = (k + 1) % nv;
-      fc->insert_vertex(ra[k]);
-      fc->insert_vertex(ra[k1]);
-      fc->insert_vertex(rb[k1]);
-      fc->insert_vertex(ra[k]);
-      fc->insert_vertex(rb[k1]);
-      fc->insert_vertex(rb[k]);
-    }
+    loft_rings(map_tubes.insert_face(THDB3DFC_TRIANGLES), ra, rb);
   };
   auto station_ring = [&](size_t i) {  // a station section stretched to the drawn walls
     std::vector<lxVec> P;
@@ -827,22 +894,10 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       if (!sec[j].ok && (nbrs[j].size() == 1)) {
         thdb1ds & e = d1.station_vec[j];
         thdb3dvx * ev = walls.insert_vertex(e.x, e.y, e.z);
-        thdb3dfc * fc = walls.insert_face(THDB3DFC_TRIANGLES);
-        size_t nv = sec[i].vx.size();
-        for (size_t k = 0; k < nv; k++) {
-          fc->insert_vertex(sec[i].vx[k]);
-          fc->insert_vertex(sec[i].vx[(k + 1) % nv]);
-          fc->insert_vertex(ev);
-        }
+        taper_ring(walls.insert_face(THDB3DFC_TRIANGLES), sec[i].vx, ev);
         if (usemap) {
           std::vector<thdb3dvx *> r = ring(station_ring(i));
-          thdb3dfc * mf = map_tubes.insert_face(THDB3DFC_TRIANGLES);
-          thdb3dvx * mev = map_tubes.insert_vertex(e.x, e.y, e.z);
-          for (size_t k = 0; k < r.size(); k++) {
-            mf->insert_vertex(r[k]);
-            mf->insert_vertex(r[(k + 1) % r.size()]);
-            mf->insert_vertex(mev);
-          }
+          taper_ring(map_tubes.insert_face(THDB3DFC_TRIANGLES), r, map_tubes.insert_vertex(e.x, e.y, e.z));
         }
         sec[i].ntubes++;
         ntapers++;
@@ -858,18 +913,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         std::vector<thdb3dvx *> rb;
         for (size_t k = 0; k < nv; k++)
           rb.push_back(walls.insert_vertex(a.point(k) + shift));
-        thdb3dfc * fc = walls.insert_face(THDB3DFC_TRIANGLES);
-        for (size_t k = 0; k < nv; k++) {
-          size_t k1 = (k + 1) % nv;
-          fc->insert_vertex(a.vx[k]);
-          fc->insert_vertex(a.vx[k1]);
-          fc->insert_vertex(rb[k1]);
-          fc->insert_vertex(a.vx[k]);
-          fc->insert_vertex(rb[k1]);
-          fc->insert_vertex(rb[k]);
-        }
+        loft_rings(walls.insert_face(THDB3DFC_TRIANGLES), a.vx, rb);
         // close the end inside the junction
-        if (cap(a, rb, walls.insert_vertex(a.c + shift), walls)) ncaps++; else nfans++;
+        if (cap(a, rb, walls.insert_vertex(a.c + shift), walls, shift)) ncaps++; else nfans++;
         if (usemap) {
           // branch of the model from maps and sections: the section carried along
           // the leg, stretched to the drawn walls, up to where the passage opens
@@ -1038,17 +1084,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
           rb.push_back(walls.insert_vertex(at(bp, kb, kb1, f, bpt)));
         }
       }
-      thdb3dfc * fc = walls.insert_face(THDB3DFC_TRIANGLES);
-      size_t nv = ra.size();
-      for (size_t k = 0; k < nv; k++) {
-        size_t k1 = (k + 1) % nv;
-        fc->insert_vertex(ra[k]);
-        fc->insert_vertex(ra[k1]);
-        fc->insert_vertex(rb[k1]);
-        fc->insert_vertex(ra[k]);
-        fc->insert_vertex(rb[k1]);
-        fc->insert_vertex(rb[k]);
-      }
+      loft_rings(walls.insert_face(THDB3DFC_TRIANGLES), ra, rb);
       if (usemap) {
         // sections every MAP_SPACING: the tube at that point, stretched to the drawn walls
         lxVec ha = horizontal(a.u), hb = horizontal(b.u);
@@ -1080,9 +1116,17 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   for (size_t i = 0; i < nst; i++) {
     section & s = sec[i];
     if (!s.ok || (s.ntubes >= 2)) continue;
-    if (cap(s, s.vx, walls.insert_vertex(s.c), walls)) ncaps++; else nfans++;
+    // outwards: away from the neighbour the tube goes to
+    lxVec out = s.n;
+    for (size_t j : nbrs[i])
+      if (sec[j].ok || body[j] || (nbrs[j].size() == 1)) {
+        thdb1ds & nb = d1.station_vec[j];
+        out = s.c - lxVec(nb.x, nb.y, nb.z);
+        break;
+      }
+    if (cap(s, s.vx, walls.insert_vertex(s.c), walls, out)) ncaps++; else nfans++;
     if (usemap) {
-      if (cap(s, ring(station_ring(i)), map_tubes.insert_vertex(s.c), map_tubes)) ncaps++; else nfans++;
+      if (cap(s, ring(station_ring(i)), map_tubes.insert_vertex(s.c), map_tubes, out)) ncaps++; else nfans++;
     }
   }
 
@@ -1300,21 +1344,23 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       for (p2t::Point * sp : steiner) cdt.AddPoint(sp);
       cdt.Triangulate();
       for (p2t::Triangle * t : cdt.GetTriangles()) {
-        for (int k = 0; k < 3; k++) fc->insert_vertex(top[idx.at(t->GetPoint(k))]);
-        for (int k = 2; k >= 0; k--) fc->insert_vertex(bottom[idx.at(t->GetPoint(k))]);
+        size_t i0 = idx.at(t->GetPoint(0)), i1 = idx.at(t->GetPoint(1)), i2 = idx.at(t->GetPoint(2));
+        tri(fc, top[i0], top[i1], top[i2], lxVec(0.0, 0.0, 1.0));
+        tri(fc, bottom[i0], bottom[i1], bottom[i2], lxVec(0.0, 0.0, -1.0));
       }
     } catch (...) {
       junctionreport += fmt::format("{:>20}  footprint could not be triangulated\n", jname);
     }
+    double sarea = 0.0;  // footprint orientation: > 0 anticlockwise
+    for (size_t k = 0, n = nboundary; k < n; k++)
+      sarea += allpts[k]->x * allpts[(k + 1) % n]->y - allpts[(k + 1) % n]->x * allpts[k]->y;
     for (size_t k = 0, n = nboundary; k < n; k++) {
       size_t k1 = (k + 1) % n;
       if ((cutof[k] >= 0) && (cutof[k] == cutof[k1])) continue;  // opening to a branch
-      fc->insert_vertex(top[k]);
-      fc->insert_vertex(bottom[k]);
-      fc->insert_vertex(bottom[k1]);
-      fc->insert_vertex(top[k]);
-      fc->insert_vertex(bottom[k1]);
-      fc->insert_vertex(top[k1]);
+      double dx = allpts[k1]->x - allpts[k]->x, dy = allpts[k1]->y - allpts[k]->y;
+      lxVec out = (sarea > 0.0) ? lxVec(dy, -dx, 0.0) : lxVec(-dy, dx, 0.0);
+      tri(fc, top[k], bottom[k], bottom[k1], out);
+      tri(fc, top[k], bottom[k1], top[k1], out);
     }
     junctionreport += fmt::format("{:>20}  footprint from the drawn walls: {} corners, {} inside, {} of {} branches cut, {} splays\n",
       jname, line.size(), steiner.size(), ncut, bj.second.size(), jsplays.size());
@@ -1346,7 +1392,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       for (lxVec & p : P) p += BRANCH_OVERLAP * dir;
       std::vector<thdb3dvx *> cur = ring(P);
       loft(be.vx, cur);
-      if (cap(sec[be.sec], cur, map_tubes.insert_vertex(be.c + BRANCH_OVERLAP * dir), map_tubes)) ncaps++; else nfans++;
+      if (cap(sec[be.sec], cur, map_tubes.insert_vertex(be.c + BRANCH_OVERLAP * dir), map_tubes, dir)) ncaps++; else nfans++;
       noverlap++;
     }
 
