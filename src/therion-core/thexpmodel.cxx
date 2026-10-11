@@ -862,6 +862,20 @@ void thexpmodel::export_vrml_file(class thdatabase * dbp) {
         }
       }
     }
+
+    if ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0) {
+      thdb3ddata * tubes[2] = {dbp->db1d.get_3d_splay_tubes(), dbp->db1d.get_3d_splay_junctions()};
+      for (thdb3ddata * td : tubes) {
+        if ((td->firstfc == NULL) || (td->firstvx == NULL)) continue;
+        finlim.update(&(td->limits));
+        fprintf(pltf,
+          "Shape {\nappearance Appearance {\n" \
+          "\tmaterial Material {\n\t\tdiffuseColor 1.0 1.0 1.0\n\t}" \
+          "\n}\ngeometry IndexedFaceSet {\n\tsolid FALSE\n");
+        td->export_vrml(pltf);
+        fprintf(pltf,"creaseAngle 3.0\n}\n}\n");
+      }
+    }
     
   } // WALLS
   
@@ -1087,6 +1101,22 @@ void thexpmodel::export_3dmf_file(class thdatabase * dbp) {
           }
           cs = cs->proj_next_scrap;
         }
+      }
+    }
+
+    if ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0) {
+      thdb3ddata * tubes[2] = {dbp->db1d.get_3d_splay_tubes(), dbp->db1d.get_3d_splay_junctions()};
+      for (thdb3ddata * td : tubes) {
+        if ((td->firstfc == NULL) || (td->firstvx == NULL)) continue;
+        finlim.update(&(td->limits));
+        td->exp_shift_x = avx;
+        td->exp_shift_y = avy;
+        td->exp_shift_z = avz;
+        fprintf(pltf,"BeginGroup ( \n\tDisplayGroup ( ) \n) \n"
+          "Container ( \n\tMesh ( \n");
+        td->export_3dmf(pltf);
+        fprintf(pltf,"\t) \nContainer ( \n\tAttributeSet ( ) \n"
+          "\tDiffuseColor ( 1 1 1 ) \n) \n) \nEndGroup ( ) \n");
       }
     }
   
@@ -1411,6 +1441,18 @@ void thexpmodel::export_dxf_file(class thdatabase * dbp) {
           }
           cs = cs->proj_next_scrap;
         }
+      }
+    }
+
+    if ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0) {
+      thdb3ddata * tubes[2] = {dbp->db1d.get_3d_splay_tubes(), dbp->db1d.get_3d_splay_junctions()};
+      for (thdb3ddata * td : tubes) {
+        if ((td->firstfc == NULL) || (td->firstvx == NULL)) continue;
+        finlim.update(&(td->limits));
+        td->exp_shift_x = avx;
+        td->exp_shift_y = avy;
+        td->exp_shift_z = avz;
+        td->export_dxf(pltf,"WALLS");
       }
     }
     
@@ -1940,6 +1982,51 @@ void thexpmodel::export_lox_file(class thdatabase * dbp) {
           survnum++;
         }
       }
+    }
+  }
+
+  // SPLAY TUBES export (one mesh for the whole model, in the top exported survey)
+  if (((this->items & TT_EXPMODEL_ITEM_WALLS) != 0) && ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0)) {
+    long topsurvey = -1;
+    for (i = 0; (i < nstat) && (topsurvey < 0); i++) {
+      if (stnum_orig[i] <= 0) continue;
+      sptr = dbp->db1d.station_vec[i].survey;
+      while ((sptr->fsptr != NULL) && (sptr->fsptr->num1 >= 0))
+        sptr = sptr->fsptr;
+      topsurvey = sptr->num1;
+    }
+    thdb3ddata * tubes[2] = {dbp->db1d.get_3d_splay_tubes(), dbp->db1d.get_3d_splay_junctions()};
+    for (thdb3ddata * td : tubes) {
+      if ((topsurvey < 0) || (td->nfaces == 0) || (td->firstvx == NULL)) continue;
+      expf_scrap.m_id = survnum;
+      expf_scrap.m_surveyId = topsurvey;
+      lxFile3Point * pdata = new lxFile3Point [td->nvertices];
+      thdb3dvx * vxp;
+      for(i = 0, vxp = td->firstvx; vxp != NULL; vxp = vxp->next, i++) {
+        pdata[i].m_c[0] = lxFilePrepDbl(vxp->x);
+        pdata[i].m_c[1] = lxFilePrepDbl(vxp->y);
+        pdata[i].m_c[2] = lxFilePrepDbl(vxp->z);
+      }
+      expf_scrap.m_numPoints = td->nvertices;
+      expf_scrap.m_pointsPtr = expf.m_scrapsData.AppendData(reinterpret_cast<const uint8_t*>(pdata), i * sizeof(lxFile3Point));
+      // the tubes are made of triangles only
+      std::vector<lxFile3Angle> tvec;
+      lxFile3Angle t3;
+      for (thdb3dfc * fcp = td->firstfc; fcp != NULL; fcp = fcp->next) {
+        if (fcp->type != THDB3DFC_TRIANGLES) continue;
+        for (thdb3dfx * fxp = fcp->firstfx; (fxp != NULL) && (fxp->next != NULL) && (fxp->next->next != NULL);
+             fxp = fxp->next->next->next) {
+          t3.m_v[0] = fxp->vertex->id;
+          t3.m_v[1] = fxp->next->vertex->id;
+          t3.m_v[2] = fxp->next->next->vertex->id;
+          tvec.push_back(t3);
+        }
+      }
+      expf_scrap.m_num3Angles = tvec.size();
+      expf_scrap.m_3AnglesPtr = expf.m_scrapsData.AppendData(reinterpret_cast<const uint8_t*>(tvec.data()), tvec.size() * sizeof(lxFile3Angle));
+      delete [] pdata;
+      expf.m_scraps.push_back(expf_scrap);
+      survnum++;
     }
   }
 

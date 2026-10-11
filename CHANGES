@@ -6,6 +6,8 @@ therion:
  * new `gltf' model export format (glTF 2.0 binary, .glb)
  * new `html' model export format: single web page with a 3D viewer
    (three.js); new `-viewer-source web/embedded' model export option
+ * new `splay-tubes' model wall source: passage tubes from cross-section
+   splay shots
 
 Windows installer:
  * use TeXLive 2026 binaries instead of dated W32TeX distribution
