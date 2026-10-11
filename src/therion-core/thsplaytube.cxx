@@ -54,6 +54,8 @@ namespace {
 
 const double CANDIDATE_ANGLE = 45.0;  // max. angle of splays to the reference plane for plane fitting [deg]
 const double SECTION_ANGLE = 25.0;  // max. angle of section splays to the fitted plane [deg]
+const double TILTED_PLANE = 15.0;  // planes tilted more than this from vertical: splays judged in 3D only [deg]
+const double LEVEL_SPLAY = 45.0;  // splays inclined less than this are judged by their horizontal angle [deg]
 const double MAX_PLANE_TURN = 35.0;  // max. angle between fitted and reference plane [deg]
 const double STEEP = 0.7;  // |z| of the bisector above which the plane is not kept vertical
 const double MAX_GAP = 150.0;  // larger angular gaps are closed at the station [deg]
@@ -261,6 +263,18 @@ double deg(double rad) {
 double plane_angle(const lxVec & w, const lxVec & n) {
   double wl = std::hypot(std::hypot(w.x, w.y), w.z);
   return (wl > 0.0) ? deg(asin(std::min(1.0, fabs(w * n) / wl))) : 90.0;
+}
+
+// Angle of a splay to a section plane as used for choosing section splays:
+// splays within LEVEL_SPLAY of level by their direction seen from above (the
+// angle between the splay and the plane's line in plan), steeper ones in 3D,
+// as their direction from above means little; in 3D also for planes tilted
+// more than TILTED_PLANE from vertical (steep passages).
+double splay_angle(const lxVec & w, const lxVec & n) {
+  double wh = std::hypot(w.x, w.y), nh = std::hypot(n.x, n.y);
+  if ((wh < 1e-9) || (nh < 1e-9) || (deg(atan2(fabs(w.z), wh)) >= LEVEL_SPLAY)
+      || (deg(asin(std::min(1.0, fabs(n.z)))) > TILTED_PLANE)) return plane_angle(w, n);
+  return deg(asin(std::min(1.0, fabs(w.x * n.x + w.y * n.y) / (wh * nh))));
 }
 
 // Normal of the plane through the origin best fitting the unit directions
@@ -740,7 +754,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     for (int iter = 0; iter < 2; iter++) {
       cand.clear();
       for (const lxVec & w : splays)
-        if (plane_angle(w, s.n) <= CANDIDATE_ANGLE) cand.push_back(w);
+        if (splay_angle(w, s.n) <= CANDIDATE_ANGLE) cand.push_back(w);
       if (cand.size() < 3) break;
       lxVec nf = fit_plane(cand);
       if (nf * nref < 0.0) nf = -1.0 * nf;
@@ -768,7 +782,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     std::vector<corner> pts;
     double sum2 = 0.0, worst = 0.0;
     for (const lxVec & w : splays) {
-      double pa = plane_angle(w, s.n);
+      double pa = splay_angle(w, s.n);
       if (pa > SECTION_ANGLE) continue;
       double pu = w * s.u, pv = w * s.v, ang = atan2(pv, pu);
       if (ang < 0.0) ang += 2.0 * M_PI;
@@ -1826,11 +1840,13 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   thlog(fmt::format("\n\n########################### splay tubes ###########################\n"
     "Section plane at each station: leg bisector (vertical unless steep), turned to the best\n"
     "fit of splays within {:.0f} deg of it; section splays are within {:.0f} deg of that plane.\n"
+    "Splays inclined less than {:.0f} deg are measured by their direction seen from above\n"
+    "(where the plane is within {:.0f} deg of vertical).\n"
     "turn = angle between fitted plane and bisector, spread = RMS angle of the section splays\n"
     "to the plane, worst = largest of these (all in degrees); centre = distance from the\n"
     "station to the centre of the section polygon (m), around which tubes join sections.\n\n"
     "{:>20} {:>4} {:>6} {:>4}  {:>5} {:>6} {:>5} {:>6}  {}\n{}",
-    CANDIDATE_ANGLE, SECTION_ANGLE, "STATION", "LEGS", "SPLAYS", "USED", "TURN", "SPREAD", "WORST", "CENTRE", "PLANE",
+    CANDIDATE_ANGLE, SECTION_ANGLE, LEVEL_SPLAY, TILTED_PLANE, "STATION", "LEGS", "SPLAYS", "USED", "TURN", "SPREAD", "WORST", "CENTRE", "PLANE",
     report));
   thlog(fmt::format("\nTube joins: corners of neighbouring sections joined directly when their\n"
     "positions (0-400 round the section) differ by at most {:.0f}:\n{}", PAIR_TOLERANCE, tubereport));
