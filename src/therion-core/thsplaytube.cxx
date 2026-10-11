@@ -1162,8 +1162,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     }
     return top >= bot;
   };
-  for (auto & bj : branch_ends) {
-    size_t j = bj.first;
+  for (size_t j = 0; (j < nst) && usemap; j++) {
+    if (!body[j]) continue;
+    std::vector<branch_end> & bends = branch_ends[j];
     thdb1ds & js = d1.station_vec[j];
     std::string jname = fmt::format("{}@{}", js.name, js.survey->full_name);
     const ring2 * outline = NULL;
@@ -1179,8 +1180,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     // boundary points on a cut: heights fixed to the branch end ring, and which cut
     std::map<std::pair<long, long>, std::array<double, 3>> fixed;
     auto key = [](double x, double y) { return std::make_pair(std::lround(x * 1e4), std::lround(y * 1e4)); };
-    for (size_t bi = 0; bi < bj.second.size(); bi++) {
-      branch_end & be = bj.second[bi];
+    for (size_t bi = 0; bi < bends.size(); bi++) {
+      branch_end & be = bends[bi];
       double tr, tl;
       size_t er, el;
       if (!ray_ring(fp, be.c.x, be.c.y, be.h.x, be.h.y, tr, er) ||
@@ -1222,13 +1223,43 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       be.joined = true;
       ncut++;
     }
+    // legs to neighbours without a branch end (junctions, stations without a
+    // section): cut across the leg halfway, so the footprint covers only its
+    // own stretch of passage; passage ends without a section are kept whole
+    size_t nhalf = 0;
+    for (size_t k : nbrs[j]) {
+      bool hasend = false;
+      for (const branch_end & be : bends)
+        if (be.sec == k) hasend = true;
+      if (hasend || (!sec[k].ok && (nbrs[k].size() == 1))) continue;
+      thdb1ds & ks = d1.station_vec[k];
+      lxVec c(0.5 * (js.x + ks.x), 0.5 * (js.y + ks.y), 0.5 * (js.z + ks.z)), h(-(ks.y - js.y), ks.x - js.x, 0.0);
+      if (h.Length() < 1e-6) continue;
+      h.Normalize();
+      double tr, tl;
+      size_t er, el;
+      if (!ray_ring(fp, c.x, c.y, h.x, h.y, tr, er) || !ray_ring(fp, c.x, c.y, -h.x, -h.y, tl, el) || (er == el)) continue;
+      std::array<double, 2> pr = {c.x + tr * h.x, c.y + tr * h.y}, pl = {c.x - tl * h.x, c.y - tl * h.y};
+      size_t n = fp.size();
+      ring2 l1, l2;
+      l1.push_back(pr);
+      for (size_t q = (er + 1) % n; ; q = (q + 1) % n) { l1.push_back(fp[q]); if (q == el) break; }
+      l1.push_back(pl);
+      l2.push_back(pl);
+      for (size_t q = (el + 1) % n; ; q = (q + 1) % n) { l2.push_back(fp[q]); if (q == er) break; }
+      l2.push_back(pr);
+      if (in_ring(l1, js.x, js.y)) fp = l1;
+      else if (in_ring(l2, js.x, js.y)) fp = l2;
+      else continue;
+      nhalf++;
+    }
     // Roof and floor: at a point of the footprint, each branch end gives the
     // heights of its section at the same position across the passage (its
     // outermost point beyond its walls); branches nearer the point count more.
     // Junction splay ends above the roof (below the floor) raise (lower) it nearby.
     auto branch_heights = [&](double x, double y, double & top, double & bot) {
       double sw = 0.0, st = 0.0, sb = 0.0;
-      for (const branch_end & be : bj.second) {
+      for (const branch_end & be : bends) {
         size_t n = be.P.size();
         std::vector<double> ac(n);
         double amin = 1e99, amax = -1e99;
@@ -1256,9 +1287,16 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         st += w * t;
         sb += w * b;
       }
-      if (sw <= 0.0) {
-        top = js.z + 1.0;
-        bot = js.z - 0.5;
+      if (sw <= 0.0) {  // no branch sections: from the station's splays
+        double rw = 0.0, rz = 0.0, fw = 0.0, fz = 0.0;
+        for (thdb1d_tree_arrow * ar = nodes[j].first_arrow; ar != NULL; ar = ar->next_arrow) {
+          if ((ar->leg->leg->flags & TT_LEGFLAG_SPLAY) == 0) continue;
+          thdb1ds & e = d1.station_vec[ar->end_node->uid - 1];
+          double w = 1.0 / ((e.x - x) * (e.x - x) + (e.y - y) * (e.y - y) + 0.01);
+          if (e.z >= js.z) { rw += w; rz += w * e.z; } else { fw += w; fz += w * e.z; }
+        }
+        top = (rw > 0.0) ? rz / rw : js.z + 1.0;
+        bot = (fw > 0.0) ? fz / fw : js.z - 0.5;
         return;
       }
       top = st / sw;
@@ -1362,8 +1400,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       tri(fc, top[k], bottom[k], bottom[k1], out);
       tri(fc, top[k], bottom[k1], top[k1], out);
     }
-    junctionreport += fmt::format("{:>20}  footprint from the drawn walls: {} corners, {} inside, {} of {} branches cut, {} splays\n",
-      jname, line.size(), steiner.size(), ncut, bj.second.size(), jsplays.size());
+    junctionreport += fmt::format("{:>20}  footprint from the drawn walls: {} corners, {} inside, {} of {} branches cut, "
+      "{} legs cut halfway, {} splays\n",
+      jname, line.size(), steiner.size(), ncut, bends.size(), nhalf, jsplays.size());
   }
 
   thlog(fmt::format("\n\n########################### splay tubes ###########################\n"
