@@ -57,6 +57,11 @@ const double STEEP = 0.7;  // |z| of the bisector above which the plane is not k
 const double MAX_GAP = 150.0;  // larger angular gaps are closed at the station [deg]
 const double VIRTUAL_MIN = 0.2;  // drawn wall this far beyond the section's furthest point gets a virtual splay [m]
 const double OUTSIDE_REPORT = 0.5;  // splay ends this far outside the drawn walls are reported [m]
+const double MAP_SPACING = 1.0;  // spacing of sections along legs in the model from maps and sections [m]
+const double BRANCH_OPENING = 1.5;  // a branch stops where its drawn width grows by this factor (junction)
+const double BRANCH_END = 1.0;  // and at the latest this far before the junction station [m]
+const double BRANCH_OVERLAP = 0.5;  // a branch that cannot be joined to its junction runs this far into it [m]
+const double STRETCH_REPORT = 2.0;  // stretches by more than this factor are reported
 const double PAIR_TOLERANCE = 20.0;  // max. position difference of corners joined directly (100 = quarter)
 const double ANCHOR_TIE = 0.05;  // corners this close to an extreme are practically equal [m]
 
@@ -344,8 +349,38 @@ bool cap(const section & s, const std::vector<thdb3dvx *> & ring, thdb3dvx * sta
 
 // Walls of the plan drawing: outline edges of each selected plan scrap in
 // model coordinates (x, y), and the scraps in which each station is drawn.
+typedef std::vector<std::array<double, 2>> ring2;
+
+// point in a closed ring (even-odd)
+bool in_ring(const ring2 & r, double x, double y) {
+  bool in = false;
+  for (size_t k = 0, n = r.size(); k < n; k++) {
+    const auto & a = r[k], & b = r[(k + 1) % n];
+    if (((a[1] > y) != (b[1] > y)) && (x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0])) in = !in;
+  }
+  return in;
+}
+
+// first crossing of the ray from (x, y) along (dx, dy) with a ring: distance and edge
+bool ray_ring(const ring2 & r, double x, double y, double dx, double dy, double & dist, size_t & edge) {
+  bool found = false;
+  for (size_t k = 0, n = r.size(); k < n; k++) {
+    const auto & a = r[k], & b = r[(k + 1) % n];
+    double ex = b[0] - a[0], ey = b[1] - a[1], den = dx * ey - dy * ex;
+    if (std::fabs(den) < 1e-12) continue;
+    double t = ((a[0] - x) * ey - (a[1] - y) * ex) / den, u = ((a[0] - x) * dy - (a[1] - y) * dx) / den;
+    if ((t > 1e-6) && (u >= 0.0) && (u <= 1.0) && (!found || (t < dist))) {
+      dist = t;
+      edge = k;
+      found = true;
+    }
+  }
+  return found;
+}
+
 struct drawn_walls {
   std::vector<std::vector<std::array<double, 4>>> scraps;
+  std::vector<std::vector<ring2>> rings;  // outline rings of each scrap
   std::map<size_t, std::vector<size_t>> station_scraps;  // station index -> scraps
 
   void collect(thdatabase * db) {
@@ -357,15 +392,21 @@ struct drawn_walls {
       thscrapis is(cs);
       is.outline_scan(cs->get_outline());
       std::vector<std::array<double, 4>> edges;
+      std::vector<ring2> rr;
       double sx = cs->proj->shift_x, sy = cs->proj->shift_y;
-      for (thscrapisolpt * ol = is.firstolseg; ol != NULL; ol = ol->next_segment)
+      for (thscrapisolpt * ol = is.firstolseg; ol != NULL; ol = ol->next_segment) {
+        ring2 r;
         for (thscrapisolpt * p = ol; p != NULL; p = p->next) {
           thscrapisolpt * q = (p->next != NULL) ? p->next : ol;
           if (q != p) edges.push_back({p->x + sx, p->y + sy, q->x + sx, q->y + sy});
+          r.push_back({p->x + sx, p->y + sy});
         }
+        if (r.size() >= 3) rr.push_back(r);
+      }
       if (edges.empty()) continue;
       size_t si = scraps.size();
       scraps.push_back(edges);
+      rings.push_back(rr);
       for (th2ddataobject * o2 = cs->fs2doptr; o2 != NULL; o2 = o2->nscrapoptr) {
         if (o2->get_class_id() != TT_POINT_CMD) continue;
         thpoint * pp = dynamic_cast<thpoint*>(o2);
@@ -404,6 +445,18 @@ struct drawn_walls {
       if ((t > 1e-6) && (u >= 0.0) && (u <= 1.0) && ((best < 0.0) || (t < best))) best = t;
     }
     return best;
+  }
+
+  // drawn walls either side of a point, along the horizontal direction h: distances right and left
+  bool width(double x, double y, const lxVec & h, double & right, double & left) const {
+    right = left = -1.0;
+    for (size_t si = 0; si < scraps.size(); si++) {
+      if (!inside(si, x, y)) continue;
+      double tr = ray(si, x, y, h.x, h.y), tl = ray(si, x, y, -h.x, -h.y);
+      if ((tr > 0.0) && ((right < 0.0) || (tr < right))) right = tr;
+      if ((tl > 0.0) && ((left < 0.0) || (tl < left))) left = tl;
+    }
+    return (right > 0.0) && (left > 0.0);
   }
 
   // drawn scraps containing the station: those where it is drawn, else any whose walls enclose it
@@ -451,7 +504,8 @@ bool splay_body(const lxVec & c, const std::vector<lxVec> & splays, thdb3ddata &
 
 
 void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section_splays,
-  thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays)
+  thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays,
+  thdb3ddata & map_tubes, thdb3ddata & map_junctions)
 {
   thdb1d & d1 = db->db1d;
   thdb1d_tree_node * nodes = d1.get_tree_nodes();
@@ -695,6 +749,74 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     if (splay_body(c, splays, junctions)) nbodies++;
   }
 
+  // Model from maps and sections: sections every MAP_SPACING along each leg
+  // (each the tube between the two station sections at that point), stretched
+  // sideways only, right and left separately, to the drawn plan walls on the
+  // horizontal line across the passage there.
+  bool usemap = !drawn.scraps.empty();
+  std::string stretchreport;
+  size_t nrings = 0, nstretched = 0;
+  auto horizontal = [](const lxVec & u) {
+    lxVec h(u.x, u.y, 0.0);
+    if (h.Length() < 1e-6) h = lxVec(1.0, 0.0, 0.0);
+    h.Normalize();
+    return h;
+  };
+  auto stretch = [&](std::vector<lxVec> & P, const lxVec & c, const lxVec & h, const std::string & where) {
+    double dr, dl;
+    if (!drawn.width(c.x, c.y, h, dr, dl)) return;
+    double R = 0.0, L = 0.0;
+    for (const lxVec & p : P) {
+      double x = (p - c) * h;
+      R = std::max(R, x);
+      L = std::max(L, -x);
+    }
+    double fr = (R > 0.1) ? dr / R : 1.0, fl = (L > 0.1) ? dl / L : 1.0;
+    for (lxVec & p : P) {
+      double x = (p - c) * h;
+      p += (x * (((x > 0.0) ? fr : fl) - 1.0)) * h;
+    }
+    nstretched++;
+    if ((std::max(fr, fl) > STRETCH_REPORT) || (std::min(fr, fl) < 1.0 / STRETCH_REPORT))
+      stretchreport += fmt::format("{:>30}  right x{:.2f} ({:.2f} -> {:.2f} m)  left x{:.2f} ({:.2f} -> {:.2f} m)\n",
+        where, fr, R, dr, fl, L, dl);
+  };
+  auto ring = [&](const std::vector<lxVec> & P) {
+    std::vector<thdb3dvx *> r;
+    for (const lxVec & p : P) r.push_back(map_tubes.insert_vertex(p));
+    nrings++;
+    return r;
+  };
+  auto loft = [&](const std::vector<thdb3dvx *> & ra, const std::vector<thdb3dvx *> & rb) {
+    thdb3dfc * fc = map_tubes.insert_face(THDB3DFC_TRIANGLES);
+    size_t nv = ra.size();
+    for (size_t k = 0; k < nv; k++) {
+      size_t k1 = (k + 1) % nv;
+      fc->insert_vertex(ra[k]);
+      fc->insert_vertex(ra[k1]);
+      fc->insert_vertex(rb[k1]);
+      fc->insert_vertex(ra[k]);
+      fc->insert_vertex(rb[k1]);
+      fc->insert_vertex(rb[k]);
+    }
+  };
+  auto station_ring = [&](size_t i) {  // a station section stretched to the drawn walls
+    std::vector<lxVec> P;
+    for (size_t k = 0; k < sec[i].q.size(); k++) P.push_back(sec[i].point(k));
+    stretch(P, sec[i].c, horizontal(sec[i].u), fmt::format("{}@{}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name));
+    return P;
+  };
+  // branches ending at junctions: end position, across direction, end ring
+  // (points and vertices), whether it is joined to the junction, its section
+  struct branch_end {
+    lxVec c, h;
+    std::vector<lxVec> P;
+    std::vector<thdb3dvx *> vx;
+    bool joined;
+    size_t sec;
+  };
+  std::map<size_t, std::vector<branch_end>> branch_ends;
+
   // tubes along legs between stations with sections
   size_t ntubes = 0, ntapers = 0, nextended = 0, ncaps = 0, nfans = 0;
   std::string flipreport, tubereport;
@@ -711,6 +833,16 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
           fc->insert_vertex(sec[i].vx[k]);
           fc->insert_vertex(sec[i].vx[(k + 1) % nv]);
           fc->insert_vertex(ev);
+        }
+        if (usemap) {
+          std::vector<thdb3dvx *> r = ring(station_ring(i));
+          thdb3dfc * mf = map_tubes.insert_face(THDB3DFC_TRIANGLES);
+          thdb3dvx * mev = map_tubes.insert_vertex(e.x, e.y, e.z);
+          for (size_t k = 0; k < r.size(); k++) {
+            mf->insert_vertex(r[k]);
+            mf->insert_vertex(r[(k + 1) % r.size()]);
+            mf->insert_vertex(mev);
+          }
         }
         sec[i].ntubes++;
         ntapers++;
@@ -738,6 +870,50 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         }
         // close the end inside the junction
         if (cap(a, rb, walls.insert_vertex(a.c + shift), walls)) ncaps++; else nfans++;
+        if (usemap) {
+          // branch of the model from maps and sections: the section carried along
+          // the leg, stretched to the drawn walls, up to where the passage opens
+          // into the junction (or BRANCH_END before the junction station)
+          lxVec h = horizontal(a.u), cj(e.x, e.y, e.z);
+          double len = std::hypot(cj.x - a.c.x, cj.y - a.c.y), fmax = (len > BRANCH_END) ? (len - BRANCH_END) / len : 0.0;
+          double w0r, w0l, wr, wl;
+          bool w0 = drawn.width(a.c.x, a.c.y, h, w0r, w0l);
+          std::vector<lxVec> P0 = station_ring(i);
+          std::vector<thdb3dvx *> prev = ring(P0);
+          double fend = 0.0;
+          std::vector<lxVec> Pend = P0;
+          int nseg = std::max(1, (int) ceil(fmax * len / MAP_SPACING));
+          for (int m = 1; (m <= nseg) && (fmax > 0.0); m++) {
+            double f = fmax * m / nseg;
+            lxVec c = a.c + f * (cj - a.c);
+            if (w0 && drawn.width(c.x, c.y, h, wr, wl) && (wr + wl > BRANCH_OPENING * (w0r + w0l))) break;
+            std::vector<lxVec> P;
+            for (size_t k = 0; k < a.q.size(); k++) P.push_back(a.point(k) + (c - a.c));
+            stretch(P, c, h, fmt::format("{}@{} -> {}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name, e.name));
+            std::vector<thdb3dvx *> cur = ring(P);
+            loft(prev, cur);
+            prev = cur;
+            fend = f;
+            Pend = P;
+          }
+          // the end ring is made vertical in the cut plane and left open: the
+          // junction uses it as its opening to this branch
+          if (fend == 0.0) {
+            std::vector<thdb3dvx *> cur = ring(Pend);
+            loft(prev, cur);
+            prev = cur;
+          }
+          lxVec cend = a.c + fend * (cj - a.c), nh(-h.y, h.x, 0.0);
+          for (size_t k = 0; k < prev.size(); k++) {
+            lxVec v = prev[k]->get_vector();
+            v = v - ((v - cend) * nh) * nh;
+            prev[k]->x = v.x;
+            prev[k]->y = v.y;
+            prev[k]->z = v.z;
+            Pend[k] = v;
+          }
+          branch_ends[j].push_back({cend, h, Pend, prev, false, i});
+        }
         a.ntubes++;
         nextended++;
         continue;
@@ -873,6 +1049,27 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         fc->insert_vertex(rb[k1]);
         fc->insert_vertex(rb[k]);
       }
+      if (usemap) {
+        // sections every MAP_SPACING: the tube at that point, stretched to the drawn walls
+        lxVec ha = horizontal(a.u), hb = horizontal(b.u);
+        if (flip) hb = -1.0 * hb;
+        double len = std::hypot(b.c.x - a.c.x, b.c.y - a.c.y);
+        int nseg = std::max(1, (int) ceil(len / MAP_SPACING));
+        std::vector<thdb3dvx *> prev;
+        for (int m = 0; m <= nseg; m++) {
+          double f = double(m) / nseg;
+          std::vector<lxVec> P;
+          for (size_t k = 0; k < ra.size(); k++)
+            P.push_back((1.0 - f) * ra[k]->get_vector() + f * rb[k]->get_vector());
+          lxVec c = (1.0 - f) * a.c + f * b.c, h = (1.0 - f) * ha + f * hb;
+          h = horizontal(h);
+          stretch(P, c, h, fmt::format("{}@{} - {} {:.0f}%", d1.station_vec[i].name,
+            d1.station_vec[i].survey->full_name, d1.station_vec[j].name, 100.0 * f));
+          std::vector<thdb3dvx *> cur = ring(P);
+          if (m > 0) loft(prev, cur);
+          prev = cur;
+        }
+      }
       a.ntubes++;
       b.ntubes++;
       ntubes++;
@@ -884,6 +1081,243 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     section & s = sec[i];
     if (!s.ok || (s.ntubes >= 2)) continue;
     if (cap(s, s.vx, walls.insert_vertex(s.c), walls)) ncaps++; else nfans++;
+    if (usemap) {
+      if (cap(s, ring(station_ring(i)), map_tubes.insert_vertex(s.c), map_tubes)) ncaps++; else nfans++;
+    }
+  }
+
+  // Junctions in the model from maps and sections: the drawn outline around the
+  // junction, cut across each branch where the branch ends; roof and floor from
+  // the shapes of the branch ends and the junction splays.
+  std::string junctionreport;
+  // height of the top and bottom of a branch end ring at a position across it
+  auto ring_extent = [](const branch_end & be, double a, double & top, double & bot, bool clamp) {
+    size_t n = be.P.size();
+    std::vector<double> ac(n);
+    double amin = 1e99, amax = -1e99;
+    for (size_t k = 0; k < n; k++) {
+      ac[k] = (be.P[k].x - be.c.x) * be.h.x + (be.P[k].y - be.c.y) * be.h.y;
+      amin = std::min(amin, ac[k]);
+      amax = std::max(amax, ac[k]);
+    }
+    if (clamp) a = std::max(amin, std::min(amax, a));
+    top = -1e99;
+    bot = 1e99;
+    for (size_t k = 0; k < n; k++) {
+      size_t k1 = (k + 1) % n;
+      double a0 = ac[k], a1 = ac[k1];
+      if ((a0 - a) * (a1 - a) > 0.0) continue;
+      if (std::fabs(a1 - a0) > 1e-9) {
+        double z = be.P[k].z + (a - a0) / (a1 - a0) * (be.P[k1].z - be.P[k].z);
+        top = std::max(top, z);
+        bot = std::min(bot, z);
+      } else {
+        top = std::max(top, std::max(be.P[k].z, be.P[k1].z));
+        bot = std::min(bot, std::min(be.P[k].z, be.P[k1].z));
+      }
+    }
+    return top >= bot;
+  };
+  for (auto & bj : branch_ends) {
+    size_t j = bj.first;
+    thdb1ds & js = d1.station_vec[j];
+    std::string jname = fmt::format("{}@{}", js.name, js.survey->full_name);
+    const ring2 * outline = NULL;
+    for (size_t si = 0; (si < drawn.rings.size()) && (outline == NULL); si++)
+      for (const ring2 & r : drawn.rings[si])
+        if (in_ring(r, js.x, js.y)) { outline = &r; break; }
+    if (outline == NULL) {
+      junctionreport += fmt::format("{:>20}  not inside a drawn outline\n", jname);
+      continue;
+    }
+    ring2 fp = *outline;
+    size_t ncut = 0;
+    // boundary points on a cut: heights fixed to the branch end ring, and which cut
+    std::map<std::pair<long, long>, std::array<double, 3>> fixed;
+    auto key = [](double x, double y) { return std::make_pair(std::lround(x * 1e4), std::lround(y * 1e4)); };
+    for (size_t bi = 0; bi < bj.second.size(); bi++) {
+      branch_end & be = bj.second[bi];
+      double tr, tl;
+      size_t er, el;
+      if (!ray_ring(fp, be.c.x, be.c.y, be.h.x, be.h.y, tr, er) ||
+          !ray_ring(fp, be.c.x, be.c.y, -be.h.x, -be.h.y, tl, el) || (er == el)) continue;
+      std::array<double, 2> pr = {be.c.x + tr * be.h.x, be.c.y + tr * be.h.y},
+        pl = {be.c.x - tl * be.h.x, be.c.y - tl * be.h.y};
+      // points along the cut: the positions across of the branch end ring
+      std::vector<double> across;
+      for (const lxVec & p : be.P) {
+        double a = (p.x - be.c.x) * be.h.x + (p.y - be.c.y) * be.h.y;
+        if ((a > -tl + 1e-3) && (a < tr - 1e-3)) across.push_back(a);
+      }
+      std::sort(across.begin(), across.end());
+      across.erase(std::unique(across.begin(), across.end(), [](double x, double y) { return std::fabs(x - y) < 1e-3; }), across.end());
+      // the two loops on either side of the cut; keep the one with the junction
+      size_t n = fp.size();
+      ring2 l1, l2;
+      l1.push_back(pr);
+      for (size_t k = (er + 1) % n; ; k = (k + 1) % n) { l1.push_back(fp[k]); if (k == el) break; }
+      l1.push_back(pl);
+      for (size_t k = 0; k < across.size(); k++)  // pl -> pr along the cut
+        l1.push_back({be.c.x + across[k] * be.h.x, be.c.y + across[k] * be.h.y});
+      l2.push_back(pl);
+      for (size_t k = (el + 1) % n; ; k = (k + 1) % n) { l2.push_back(fp[k]); if (k == er) break; }
+      l2.push_back(pr);
+      for (size_t k = across.size(); k > 0; k--)  // pr -> pl along the cut
+        l2.push_back({be.c.x + across[k - 1] * be.h.x, be.c.y + across[k - 1] * be.h.y});
+      if (in_ring(l1, js.x, js.y)) fp = l1;
+      else if (in_ring(l2, js.x, js.y)) fp = l2;
+      else continue;
+      std::vector<double> all = across;
+      all.push_back(tr);
+      all.push_back(-tl);
+      for (double a : all) {
+        double t, b;
+        if (!ring_extent(be, a, t, b, true)) continue;
+        fixed[key(be.c.x + a * be.h.x, be.c.y + a * be.h.y)] = {t, b, double(bi)};
+      }
+      be.joined = true;
+      ncut++;
+    }
+    // Roof and floor: at a point of the footprint, each branch end gives the
+    // heights of its section at the same position across the passage (its
+    // outermost point beyond its walls); branches nearer the point count more.
+    // Junction splay ends above the roof (below the floor) raise (lower) it nearby.
+    auto branch_heights = [&](double x, double y, double & top, double & bot) {
+      double sw = 0.0, st = 0.0, sb = 0.0;
+      for (const branch_end & be : bj.second) {
+        size_t n = be.P.size();
+        std::vector<double> ac(n);
+        double amin = 1e99, amax = -1e99;
+        for (size_t k = 0; k < n; k++) {
+          ac[k] = (be.P[k].x - be.c.x) * be.h.x + (be.P[k].y - be.c.y) * be.h.y;
+          amin = std::min(amin, ac[k]);
+          amax = std::max(amax, ac[k]);
+        }
+        double a = (x - be.c.x) * be.h.x + (y - be.c.y) * be.h.y;
+        a = std::max(amin, std::min(amax, a));
+        double t = -1e99, b = 1e99;
+        for (size_t k = 0; k < n; k++) {
+          size_t k1 = (k + 1) % n;
+          double a0 = ac[k], a1 = ac[k1];
+          if (((a0 - a) * (a1 - a) > 0.0)) continue;
+          double z = (std::fabs(a1 - a0) > 1e-9) ? be.P[k].z + (a - a0) / (a1 - a0) * (be.P[k1].z - be.P[k].z)
+            : std::max(be.P[k].z, be.P[k1].z);
+          double zl = (std::fabs(a1 - a0) > 1e-9) ? z : std::min(be.P[k].z, be.P[k1].z);
+          t = std::max(t, z);
+          b = std::min(b, zl);
+        }
+        if (t < b) continue;
+        double d2 = (x - be.c.x) * (x - be.c.x) + (y - be.c.y) * (y - be.c.y), w = 1.0 / (d2 + 0.01);
+        sw += w;
+        st += w * t;
+        sb += w * b;
+      }
+      if (sw <= 0.0) {
+        top = js.z + 1.0;
+        bot = js.z - 0.5;
+        return;
+      }
+      top = st / sw;
+      bot = sb / sw;
+    };
+    std::vector<lxVec> jsplays;
+    for (thdb1d_tree_arrow * ar = nodes[j].first_arrow; ar != NULL; ar = ar->next_arrow) {
+      if ((ar->leg->leg->flags & TT_LEGFLAG_SPLAY) == 0) continue;
+      thdb1ds & e = d1.station_vec[ar->end_node->uid - 1];
+      if (in_ring(fp, e.x, e.y)) jsplays.push_back(lxVec(e.x, e.y, e.z));
+    }
+    auto heights = [&](double x, double y, double & top, double & bot) {
+      branch_heights(x, y, top, bot);
+      for (const lxVec & e : jsplays) {
+        double d = std::hypot(e.x - x, e.y - y);
+        if (d >= 1.0) continue;
+        double w = (1.0 - d) * (1.0 - d);
+        double et, eb;
+        branch_heights(e.x, e.y, et, eb);
+        if (e.z > et) top = std::max(top, top + w * (e.z - et));
+        if (e.z < eb) bot = std::min(bot, bot + w * (e.z - eb));
+      }
+      if (top < bot + 0.1) {
+        double zm = 0.5 * (top + bot);
+        top = zm + 0.05;
+        bot = zm - 0.05;
+      }
+    };
+    // triangulate the footprint with points inside on a grid; roof, floor and walls round it
+    std::vector<std::unique_ptr<p2t::Point>> holder;
+    std::vector<p2t::Point *> line;
+    std::map<p2t::Point *, size_t> idx;
+    std::vector<p2t::Point *> allpts;
+    for (size_t k = 0; k < fp.size(); k++) {
+      if (!line.empty() && (std::hypot(fp[k][0] - line.back()->x, fp[k][1] - line.back()->y) < 1e-4)) continue;
+      holder.push_back(std::make_unique<p2t::Point>(fp[k][0], fp[k][1]));
+      line.push_back(holder.back().get());
+    }
+    if ((line.size() > 1) && (std::hypot(line[0]->x - line.back()->x, line[0]->y - line.back()->y) < 1e-4)) line.pop_back();
+    if (line.size() < 3) continue;
+    for (p2t::Point * pt : line) { idx[pt] = allpts.size(); allpts.push_back(pt); }
+    size_t nboundary = allpts.size();
+    double xmin = 1e99, xmax = -1e99, ymin = 1e99, ymax = -1e99;
+    for (p2t::Point * pt : line) {
+      xmin = std::min(xmin, pt->x); xmax = std::max(xmax, pt->x);
+      ymin = std::min(ymin, pt->y); ymax = std::max(ymax, pt->y);
+    }
+    std::vector<p2t::Point *> steiner;
+    const double grid = 0.5;
+    for (double gx = xmin + grid / 2; gx < xmax; gx += grid)
+      for (double gy = ymin + grid / 2; gy < ymax; gy += grid) {
+        if (!in_ring(fp, gx, gy)) continue;
+        bool near = false;
+        for (size_t k = 0, n = fp.size(); (k < n) && !near; k++) {
+          const auto & a = fp[k], & b = fp[(k + 1) % n];
+          double dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+          double t = (l2 > 0.0) ? std::max(0.0, std::min(1.0, ((gx - a[0]) * dx + (gy - a[1]) * dy) / l2)) : 0.0;
+          if (std::hypot(a[0] + t * dx - gx, a[1] + t * dy - gy) < 0.15) near = true;
+        }
+        if (near) continue;
+        holder.push_back(std::make_unique<p2t::Point>(gx, gy));
+        steiner.push_back(holder.back().get());
+        idx[steiner.back()] = allpts.size();
+        allpts.push_back(steiner.back());
+      }
+    std::vector<thdb3dvx *> top, bottom;
+    std::vector<int> cutof(allpts.size(), -1);
+    for (size_t k = 0; k < allpts.size(); k++) {
+      p2t::Point * pt = allpts[k];
+      double zr, zf;
+      auto fx = fixed.find(key(pt->x, pt->y));
+      if ((k < nboundary) && (fx != fixed.end())) {
+        zr = fx->second[0];
+        zf = fx->second[1];
+        cutof[k] = int(fx->second[2]);
+      } else heights(pt->x, pt->y, zr, zf);
+      top.push_back(map_junctions.insert_vertex(pt->x, pt->y, zr));
+      bottom.push_back(map_junctions.insert_vertex(pt->x, pt->y, zf));
+    }
+    thdb3dfc * fc = map_junctions.insert_face(THDB3DFC_TRIANGLES);
+    try {
+      p2t::CDT cdt(line);
+      for (p2t::Point * sp : steiner) cdt.AddPoint(sp);
+      cdt.Triangulate();
+      for (p2t::Triangle * t : cdt.GetTriangles()) {
+        for (int k = 0; k < 3; k++) fc->insert_vertex(top[idx.at(t->GetPoint(k))]);
+        for (int k = 2; k >= 0; k--) fc->insert_vertex(bottom[idx.at(t->GetPoint(k))]);
+      }
+    } catch (...) {
+      junctionreport += fmt::format("{:>20}  footprint could not be triangulated\n", jname);
+    }
+    for (size_t k = 0, n = nboundary; k < n; k++) {
+      size_t k1 = (k + 1) % n;
+      if ((cutof[k] >= 0) && (cutof[k] == cutof[k1])) continue;  // opening to a branch
+      fc->insert_vertex(top[k]);
+      fc->insert_vertex(bottom[k]);
+      fc->insert_vertex(bottom[k1]);
+      fc->insert_vertex(top[k]);
+      fc->insert_vertex(bottom[k1]);
+      fc->insert_vertex(top[k1]);
+    }
+    junctionreport += fmt::format("{:>20}  footprint from the drawn walls: {} corners, {} inside, {} of {} branches cut, {} splays\n",
+      jname, line.size(), steiner.size(), ncut, bj.second.size(), jsplays.size());
   }
 
   thlog(fmt::format("\n\n########################### splay tubes ###########################\n"
@@ -900,6 +1334,32 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   if (!flipreport.empty())
     thlog("\nTubes where left and right are matched differently by leg direction and by normals:\n"
       + flipreport + "\n");
+  // branches not joined to a junction run a little into it and are closed
+  size_t noverlap = 0;
+  for (auto & bj : branch_ends)
+    for (branch_end & be : bj.second) {
+      if (be.joined) continue;
+      thdb1ds & js = d1.station_vec[bj.first];
+      lxVec dir(js.x - be.c.x, js.y - be.c.y, 0.0);
+      if (dir.Length() > 1e-6) dir.Normalize();
+      std::vector<lxVec> P = be.P;
+      for (lxVec & p : P) p += BRANCH_OVERLAP * dir;
+      std::vector<thdb3dvx *> cur = ring(P);
+      loft(be.vx, cur);
+      if (cap(sec[be.sec], cur, map_tubes.insert_vertex(be.c + BRANCH_OVERLAP * dir), map_tubes)) ncaps++; else nfans++;
+      noverlap++;
+    }
+
+  if (usemap) {
+    thlog(fmt::format("\nModel from maps and sections: {} sections stretched to the drawn walls ({} rings, every {:.1f} m).\n",
+      nstretched, nrings, MAP_SPACING));
+    thlog(fmt::format("Branches joined to junction footprints from the drawn walls: {}; run into the junction and closed: {}.\n",
+      [&]() { size_t n = 0; for (auto & bj : branch_ends) for (auto & be : bj.second) if (be.joined) n++; return n; }(), noverlap));
+    if (!stretchreport.empty())
+      thlog(fmt::format("Stretched by more than {:.1f} times (or less than 1/{:.1f}):\n{}", STRETCH_REPORT, STRETCH_REPORT, stretchreport));
+    if (!junctionreport.empty())
+      thlog("Junctions:\n" + junctionreport);
+  }
   if (!outside_report.empty())
     thlog(fmt::format("\nSplay ends more than {:.1f} m outside the drawn plan walls:\n{}", OUTSIDE_REPORT, outside_report));
   for (size_t i = 0; i < nst; i++)

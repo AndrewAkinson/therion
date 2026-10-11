@@ -47,9 +47,13 @@
  * @param polygons Output section polygons (closed lines).
  * @param junctions Output bodies at junctions.
  * @param virtual_splays Output virtual splays to the drawn walls (lines).
+ * @param map_tubes Output model from maps and sections: sections every 1 m
+ *   along the legs, stretched sideways to the drawn plan walls.
+ * @param map_junctions Output junctions of that model, from the drawn outline.
  */
 
 void thsplaytube_build(class thdatabase * db, thdb3ddata & walls, thdb3ddata & section_splays,
-  thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays);
+  thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays,
+  thdb3ddata & map_tubes, thdb3ddata & map_junctions);
 
 #endif
