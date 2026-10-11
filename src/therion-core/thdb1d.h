@@ -285,13 +285,14 @@ class thdb1d {
   
   thdb1d_tree_node  * tree_nodes;
   
-  thdb3ddata d3_data, d3_surface, d3_walls, d3_splay;
+  thdb3ddata d3_data, d3_surface, d3_walls, d3_splay,
+    d3_splay_tubes, d3_section_splays, d3_section_polygons, d3_splay_junctions;
 
   thattr m_station_attr;
 
   double min_year, max_year;
   
-  bool d3_data_parsed;
+  bool d3_data_parsed, d3_splay_tubes_parsed;
   
   unsigned long num_tree_legs; ///< Number of legs in the tree.
   
@@ -418,6 +419,12 @@ class thdb1d {
   thdb3ddata * get_3d_splay();
   thdb3ddata * get_3d_surface();
   thdb3ddata * get_3d_walls();
+
+  void process_splay_tubes();  ///< Build passage tubes from cross-section splays (once).
+  thdb3ddata * get_3d_splay_tubes();  ///< Passage tubes from cross-section splays.
+  thdb3ddata * get_3d_section_splays();  ///< Splays used for the tube sections.
+  thdb3ddata * get_3d_section_polygons();  ///< Tube section polygons.
+  thdb3ddata * get_3d_splay_junctions();  ///< Junction bodies from splays.
     
 };
 

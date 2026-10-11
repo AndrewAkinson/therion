@@ -82,6 +82,7 @@ set(THERION_SOURCES
     ${CMAKE_SOURCE_DIR}/src/therion-core/thscraplp.cxx
     ${CMAKE_SOURCE_DIR}/src/therion-core/thselector.cxx
     ${CMAKE_SOURCE_DIR}/src/therion-core/thsketch.cxx
+    ${CMAKE_SOURCE_DIR}/src/therion-core/thsplaytube.cxx
     ${CMAKE_SOURCE_DIR}/src/therion-core/thsurface.cxx
     ${CMAKE_SOURCE_DIR}/src/therion-core/thsurvey.cxx
     ${CMAKE_SOURCE_DIR}/src/therion-core/thsvg.cxx

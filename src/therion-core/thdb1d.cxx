@@ -26,6 +26,7 @@
  */
  
 #include "thdb1d.h"
+#include "thsplaytube.h"
 #include "thsurvey.h"
 #include "thobjectname.h"
 #include <stdlib.h>
@@ -98,6 +99,7 @@ thdb1d::thdb1d()
   this->max_year = thnan;
   
   this->d3_data_parsed = false;
+  this->d3_splay_tubes_parsed = false;
 }
 
 void thdb1ds::export_mp_flags(FILE * out)
@@ -2705,6 +2707,39 @@ thdb3ddata * thdb1d::get_3d_splay() {
 thdb3ddata * thdb1d::get_3d_walls() {
   this->get_3d();
   return &(this->d3_walls);
+}
+
+
+void thdb1d::process_splay_tubes() {
+  if (this->d3_splay_tubes_parsed)
+    return;
+  this->d3_splay_tubes_parsed = true;
+  thsplaytube_build(&thdb, this->d3_splay_tubes, this->d3_section_splays,
+    this->d3_section_polygons, this->d3_splay_junctions);
+}
+
+
+thdb3ddata * thdb1d::get_3d_splay_tubes() {
+  this->process_splay_tubes();
+  return &(this->d3_splay_tubes);
+}
+
+
+thdb3ddata * thdb1d::get_3d_section_splays() {
+  this->process_splay_tubes();
+  return &(this->d3_section_splays);
+}
+
+
+thdb3ddata * thdb1d::get_3d_section_polygons() {
+  this->process_splay_tubes();
+  return &(this->d3_section_polygons);
+}
+
+
+thdb3ddata * thdb1d::get_3d_splay_junctions() {
+  this->process_splay_tubes();
+  return &(this->d3_splay_junctions);
 }
 
 
