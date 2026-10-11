@@ -2402,6 +2402,7 @@ std::string thexpmodel::get_gltf_data(class thdatabase * dbp) {
       add(dbp->db1d.get_3d_section_splays(), "section splays", "section-splays", 1, 1.0f, 0.8f, 0.2f, 1.0f);
       add(dbp->db1d.get_3d_section_polygons(), "section polygons", "section-polygons", 1, 1.0f, 0.35f, 0.25f, 1.0f);
       add(dbp->db1d.get_3d_splay_junctions(), "junction bodies", "walls-junctions", 4, 0.95f, 0.8f, 0.6f, 1.0f);
+      add(dbp->db1d.get_3d_virtual_splays(), "virtual splays", "virtual-splays", 1, 0.2f, 1.0f, 0.4f, 1.0f);
     }
     if ((this->wallsrc & TT_WSRC_SPLAYS) != 0) {
       for (size_t ii = 0; ii < dbp->db1d.station_vec.size(); ii++) {
