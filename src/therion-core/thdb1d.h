@@ -286,7 +286,7 @@ class thdb1d {
   thdb1d_tree_node  * tree_nodes;
   
   thdb3ddata d3_data, d3_surface, d3_walls, d3_splay,
-    d3_splay_tubes, d3_section_splays, d3_section_polygons, d3_splay_junctions;
+    d3_splay_tubes, d3_section_splays, d3_section_polygons, d3_splay_junctions, d3_virtual_splays;
 
   thattr m_station_attr;
 
@@ -425,6 +425,7 @@ class thdb1d {
   thdb3ddata * get_3d_section_splays();  ///< Splays used for the tube sections.
   thdb3ddata * get_3d_section_polygons();  ///< Tube section polygons.
   thdb3ddata * get_3d_splay_junctions();  ///< Junction bodies from splays.
+  thdb3ddata * get_3d_virtual_splays();  ///< Virtual splays to the drawn plan walls.
     
 };
 

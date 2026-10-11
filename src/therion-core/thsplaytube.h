@@ -38,15 +38,18 @@
  * splays and other open tube ends are closed. Polygon corners are at the
  * true splay ends. At junctions (and stations without a section) a body
  * is built from the station's splays and the neighbouring tubes are
- * extended into it.
+ * extended into it. Where a station is drawn in a plan scrap and a drawn
+ * wall is beyond the furthest point of the section on that side, a virtual horizontal
+ * splay from the station to that wall is added to the section.
  *
  * @param walls Output tube surfaces.
  * @param section_splays Output splay shots used for the sections (lines).
  * @param polygons Output section polygons (closed lines).
  * @param junctions Output bodies at junctions.
+ * @param virtual_splays Output virtual splays to the drawn walls (lines).
  */
 
 void thsplaytube_build(class thdatabase * db, thdb3ddata & walls, thdb3ddata & section_splays,
-  thdb3ddata & polygons, thdb3ddata & junctions);
+  thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays);
 
 #endif

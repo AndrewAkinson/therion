@@ -753,7 +753,10 @@ piecewise linear 3d model from passage walls made of B\'ezier curves.
     near the plane bisecting the legs form a section polygon; neighbouring
     sections are joined into tubes along the legs, matching the rightmost,
     highest, leftmost and lowest corners. Junctions get a body made of their
-    splays. The log file lists how each station was handled.] builds tubes
+    splays. Where a station is drawn in a plan scrap and a drawn wall is more
+    than 0.2\,m beyond the section on that side, a virtual horizontal splay
+    from the station to the wall is added. The log file lists how each
+    station was handled.] builds tubes
     from cross-section splays; |all| includes it.
   * \NEW{6.4.1}|viewer-source <web/embedded>| = for the |html| format, set
     where the viewer library (three.js) comes from. With |web| (default)

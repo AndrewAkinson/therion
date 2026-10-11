@@ -28,10 +28,15 @@
 #include "thdataleg.h"
 #include "thsurvey.h"
 #include "thlog.h"
+#include "thdb2dprj.h"
+#include "thscrap.h"
+#include "thscrapis.h"
+#include "thpoint.h"
 #include "QuickHull.hpp"
 #include <poly2tri/poly2tri.h>
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <cmath>
 #include <map>
@@ -46,10 +51,12 @@
 namespace {
 
 const double CANDIDATE_ANGLE = 45.0;  // max. angle of splays to the reference plane for plane fitting [deg]
-const double SECTION_ANGLE = 20.0;  // max. angle of section splays to the fitted plane [deg]
+const double SECTION_ANGLE = 25.0;  // max. angle of section splays to the fitted plane [deg]
 const double MAX_PLANE_TURN = 35.0;  // max. angle between fitted and reference plane [deg]
 const double STEEP = 0.7;  // |z| of the bisector above which the plane is not kept vertical
 const double MAX_GAP = 150.0;  // larger angular gaps are closed at the station [deg]
+const double VIRTUAL_MIN = 0.2;  // drawn wall this far beyond the section's furthest point gets a virtual splay [m]
+const double OUTSIDE_REPORT = 0.5;  // splay ends this far outside the drawn walls are reported [m]
 const double PAIR_TOLERANCE = 20.0;  // max. position difference of corners joined directly (100 = quarter)
 const double ANCHOR_TIE = 0.05;  // corners this close to an extreme are practically equal [m]
 
@@ -335,6 +342,84 @@ bool cap(const section & s, const std::vector<thdb3dvx *> & ring, thdb3dvx * sta
   return done;
 }
 
+// Walls of the plan drawing: outline edges of each selected plan scrap in
+// model coordinates (x, y), and the scraps in which each station is drawn.
+struct drawn_walls {
+  std::vector<std::vector<std::array<double, 4>>> scraps;
+  std::map<size_t, std::vector<size_t>> station_scraps;  // station index -> scraps
+
+  void collect(thdatabase * db) {
+    thdb2dprjpr prjid = db->db2d.parse_projection("plan", false);
+    if (prjid.newprj) return;
+    db->db2d.process_projection(prjid.prj);
+    for (thscrap * cs = prjid.prj->first_scrap; cs != NULL; cs = cs->proj_next_scrap) {
+      if (!cs->fsptr->is_selected()) continue;
+      thscrapis is(cs);
+      is.outline_scan(cs->get_outline());
+      std::vector<std::array<double, 4>> edges;
+      double sx = cs->proj->shift_x, sy = cs->proj->shift_y;
+      for (thscrapisolpt * ol = is.firstolseg; ol != NULL; ol = ol->next_segment)
+        for (thscrapisolpt * p = ol; p != NULL; p = p->next) {
+          thscrapisolpt * q = (p->next != NULL) ? p->next : ol;
+          if (q != p) edges.push_back({p->x + sx, p->y + sy, q->x + sx, q->y + sy});
+        }
+      if (edges.empty()) continue;
+      size_t si = scraps.size();
+      scraps.push_back(edges);
+      for (th2ddataobject * o2 = cs->fs2doptr; o2 != NULL; o2 = o2->nscrapoptr) {
+        if (o2->get_class_id() != TT_POINT_CMD) continue;
+        thpoint * pp = dynamic_cast<thpoint*>(o2);
+        if (pp->station_name.id == 0) continue;
+        size_t k = db->db1d.station_vec[pp->station_name.id - 1].uid - 1;
+        std::vector<size_t> & v = station_scraps[k];
+        if (std::find(v.begin(), v.end(), si) == v.end()) v.push_back(si);
+      }
+    }
+  }
+
+  bool inside(size_t si, double x, double y) const {
+    bool in = false;
+    for (const auto & e : scraps[si])
+      if (((e[1] > y) != (e[3] > y)) && (x < (e[2] - e[0]) * (y - e[1]) / (e[3] - e[1]) + e[0])) in = !in;
+    return in;
+  }
+
+  double wall_distance(size_t si, double x, double y) const {
+    double best = 1e99;
+    for (const auto & e : scraps[si]) {
+      double dx = e[2] - e[0], dy = e[3] - e[1], l2 = dx * dx + dy * dy;
+      double t = (l2 > 0.0) ? std::max(0.0, std::min(1.0, ((x - e[0]) * dx + (y - e[1]) * dy) / l2)) : 0.0;
+      best = std::min(best, std::hypot(e[0] + t * dx - x, e[1] + t * dy - y));
+    }
+    return best;
+  }
+
+  // distance from (x, y) along (dx, dy) to the first wall of the scrap
+  double ray(size_t si, double x, double y, double dx, double dy) const {
+    double best = -1.0;
+    for (const auto & e : scraps[si]) {
+      double ex = e[2] - e[0], ey = e[3] - e[1], den = dx * ey - dy * ex;
+      if (std::fabs(den) < 1e-12) continue;
+      double t = ((e[0] - x) * ey - (e[1] - y) * ex) / den, u = ((e[0] - x) * dy - (e[1] - y) * dx) / den;
+      if ((t > 1e-6) && (u >= 0.0) && (u <= 1.0) && ((best < 0.0) || (t < best))) best = t;
+    }
+    return best;
+  }
+
+  // drawn scraps containing the station: those where it is drawn, else any whose walls enclose it
+  std::vector<size_t> around(size_t k, double x, double y) const {
+    std::vector<size_t> res;
+    auto it = station_scraps.find(k);
+    if (it != station_scraps.end())
+      for (size_t si : it->second)
+        if (inside(si, x, y)) res.push_back(si);
+    if (res.empty())
+      for (size_t si = 0; si < scraps.size(); si++)
+        if (inside(si, x, y)) res.push_back(si);
+    return res;
+  }
+};
+
 // Body around a station from its splays: the hull of the splay directions
 // with corners at the true splay ends (as therion's splay walls, but without legs).
 bool splay_body(const lxVec & c, const std::vector<lxVec> & splays, thdb3ddata & out) {
@@ -366,7 +451,7 @@ bool splay_body(const lxVec & c, const std::vector<lxVec> & splays, thdb3ddata &
 
 
 void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section_splays,
-  thdb3ddata & polygons, thdb3ddata & junctions)
+  thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays)
 {
   thdb1d & d1 = db->db1d;
   thdb1d_tree_node * nodes = d1.get_tree_nodes();
@@ -376,8 +461,11 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   const lxVec up(0.0, 0.0, 1.0);
   std::vector<section> sec(nst);
   std::vector<std::vector<size_t>> nbrs(nst);
-  size_t nsections = 0, nnosection = 0, njunctions = 0, nused = 0, nfitted = 0, nunordered = 0;
-  std::string report;
+  size_t nsections = 0, nnosection = 0, njunctions = 0, nused = 0, nfitted = 0, nunordered = 0,
+    nvirtual = 0;
+  std::string report, outside_report;
+  drawn_walls drawn;
+  drawn.collect(db);
 
   // centreline neighbours of each station (cave legs only)
   for (size_t i = 0; i < nst; i++) {
@@ -486,6 +574,52 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     if (plane[0] == 'f') nfitted++;
     size_t nsplays = pts.size();
     std::sort(pts.begin(), pts.end());
+
+    // the plan drawing: splay ends well outside the drawn walls are reported;
+    // where a drawn wall is beyond the furthest point of the section on that
+    // side, a virtual horizontal splay from the station to that wall is added
+    std::string virt;
+    std::vector<size_t> around = drawn.around(i, s.c.x, s.c.y);
+    if (!around.empty()) {
+      for (const corner & p : pts) {
+        lxVec e = s.c + (p.r * cos(p.a)) * s.u + (p.r * sin(p.a)) * s.v + p.h * s.n;
+        bool in = false;
+        double wd = 1e99;
+        for (size_t si : around) {
+          if (drawn.inside(si, e.x, e.y)) in = true;
+          wd = std::min(wd, drawn.wall_distance(si, e.x, e.y));
+        }
+        if (!in && (wd > OUTSIDE_REPORT))
+          outside_report += fmt::format("{:>20}  splay end {:.2f} m outside the drawn walls\n", sname, wd);
+      }
+      lxVec hor(s.u.x, s.u.y, 0.0);
+      if (hor.Length() > 0.2) {
+        hor.Normalize();
+        for (int side = 1; side >= -1; side -= 2) {
+          double dist = -1.0;
+          for (size_t si : around) {
+            double t = drawn.ray(si, s.c.x, s.c.y, side * hor.x, side * hor.y);
+            if ((t > 0.0) && ((dist < 0.0) || (t < dist))) dist = t;
+          }
+          if (dist <= 0.0) continue;
+          lxVec w = (side * dist) * hor;
+          double px = w * s.u, py = w * s.v, ang = atan2(py, px), rad = std::hypot(px, py);
+          if (ang < 0.0) ang += 2.0 * M_PI;
+          // how far the section reaches across on that side, at any height (as a plan drawing shows)
+          double reach = 0.0;
+          for (const corner & p : pts)
+            reach = std::max(reach, side * p.r * cos(p.a));
+          if (rad < reach + VIRTUAL_MIN) continue;
+          pts.push_back({ang, rad, w * s.n});
+          thdb3dfc * fc = virtual_splays.insert_face(THDB3DFC_LINE_STRIP);
+          fc->insert_vertex(virtual_splays.insert_vertex(s.c));
+          fc->insert_vertex(virtual_splays.insert_vertex(s.c + w));
+          virt += fmt::format(", virtual splay {} {:.2f} m (section {:.2f} m)", (side > 0) ? "right" : "left", rad, reach);
+          nvirtual++;
+        }
+        std::sort(pts.begin(), pts.end());
+      }
+    }
     // close large gaps at the station (station on a wall, floor or ceiling)
     double maxgap = 0.0, gapstart = 0.0;
     for (size_t k = 0; k < pts.size(); k++) {
@@ -530,7 +664,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     }
     report += fmt::format("{:>20} {:4} {:6} {:4}  {:5.1f} {:6.1f} {:5.1f} {:6.2f}  {}\n",
       sname, nbrs[i].size(), splays.size(), nsplays, turn, sqrt(sum2 / nsplays), worst,
-      hypot(s.cx, s.cy), std::string(plane) + anchors + s.moved);
+      hypot(s.cx, s.cy), std::string(plane) + anchors + s.moved + virt);
 
     thdb3dfc * pfc = polygons.insert_face(THDB3DFC_LINE_STRIP);
     np = s.q.size();  // anchors may have been listed twice
@@ -766,6 +900,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   if (!flipreport.empty())
     thlog("\nTubes where left and right are matched differently by leg direction and by normals:\n"
       + flipreport + "\n");
+  if (!outside_report.empty())
+    thlog(fmt::format("\nSplay ends more than {:.1f} m outside the drawn plan walls:\n{}", OUTSIDE_REPORT, outside_report));
   for (size_t i = 0; i < nst; i++)
     if ((nbrs[i].size() > 2) && (d1.station_vec[i].uid == i + 1) && d1.station_vec[i].survey->is_selected())
       thlog(fmt::format("{:>20} {:4}  junction\n",
@@ -773,7 +909,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   thlog(fmt::format("\n{} sections ({} fitted), {} tubes, {} tapered ends, {} tubes extended into "
     "junctions or stations without section, {} bodies from splays, {} section splays, "
     "{} stations with too few section splays, {} sections with anchors out of order, {} junctions, "
-    "{} tube ends closed by triangulation ({} by a fan from the station)\n"
+    "{} tube ends closed by triangulation ({} by a fan from the station), "
+    "{} virtual splays to drawn walls ({} plan scraps)\n"
     "##################################################################\n",
-    nsections, nfitted, ntubes, ntapers, nextended, nbodies, nused, nnosection, nunordered, njunctions, ncaps, nfans));
+    nsections, nfitted, ntubes, ntapers, nextended, nbodies, nused, nnosection, nunordered, njunctions, ncaps, nfans, nvirtual, drawn.scraps.size()));
 }
