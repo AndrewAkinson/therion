@@ -72,7 +72,6 @@ const double BRANCH_OPENING = 1.5;  // a branch stops where its drawn width grow
 const double BRANCH_END = 1.0;  // and at the latest this far before the junction station [m]
 const double BRANCH_OVERLAP = 0.5;  // a branch that cannot be joined to its junction runs this far into it [m]
 const double ELEVATION_NEAR = 0.5;  // a leg outside the drawn elevation by up to this uses the nearest span [m]
-const double ELEVATION_SCALE = 0.5;  // an extended scrap whose stations span this height is scaled by them, else by -scale [m]
 const double ELEVATION_STEEP = 60.0;  // steeper legs are not scaled to the extended elevation [deg]
 const int OVAL_POINTS = 24;  // points round an oval section of a leg without splay sections
 const double OVAL_END = 1.0;  // an oval leg starts this far from a junction [m] (at most half the leg)
@@ -610,7 +609,7 @@ struct drawn_walls {
 struct drawn_elevation {
   std::vector<std::vector<ring2>> rings;
   std::map<size_t, std::vector<size_t>> station_scraps;
-  // the same scraps as drawn: scaled by the stations' heights (else by -scale)
+  // the same scraps as drawn: scaled by their legs (-scale only without them)
   // and flipped only, not rotated or fitted to the stations (m); and the station
   // points drawn in each
   std::vector<std::vector<ring2>> raw;
@@ -644,16 +643,17 @@ struct drawn_elevation {
         ms = (pd > 0.0) ? rd / pd : 1.0;
         mr = atan2(cs->scale_r2y - cs->scale_r1y, cs->scale_r2x - cs->scale_r1x) - atan2(cs->scale_p2y - cs->scale_p1y, cs->scale_p2x - cs->scale_p1x);
       }
-      double kx = 1.0, ky = 1.0;  // the scale (and up) from the stations' heights
+      double ks = 1.0;  // the scale from the stations' legs
       auto drawn_xy = [&](const thdb2dpt * pt) {
         std::array<double, 2> q = {ms * (cos(mr) * pt->x - sin(mr) * pt->y), ms * (sin(mr) * pt->x + cos(mr) * pt->y)};
         if (cs->flip == TT_SCRAP_FLIP_HORIZ) q[0] = -q[0];
         if (cs->flip == TT_SCRAP_FLIP_VERT) q[1] = -q[1];
-        return std::array<double, 2>{kx * q[0], ky * q[1]};
+        return std::array<double, 2>{ks * q[0], ks * q[1]};
       };
-      // the station points drawn in the scrap; then the scale from them: the drawn
-      // heights fitted to the stations' true heights (heights are neither folded
-      // nor mirrored in an extended elevation; -scale may be missing or wrong)
+      // the station points drawn in the scrap; then the scale from them, as Therion
+      // scales a scrap by its stations (-scale only without them): the median of
+      // its legs' true lengths in the elevation to their drawn lengths (the same
+      // however the scrap is laid out; legs with a station drawn twice not counted)
       for (th2ddataobject * o2 = cs->fs2doptr; o2 != NULL; o2 = o2->nscrapoptr) {
         if (o2->get_class_id() != TT_POINT_CMD) continue;
         thpoint * pp = dynamic_cast<thpoint*>(o2);
@@ -664,30 +664,33 @@ struct drawn_elevation {
         if (pp->type == TT_POINT_TYPE_STATION)
           drawn[k].push_back({si, drawn_xy(pp->point)[0], drawn_xy(pp->point)[1]});
       }
-      double n = 0.0, mz = 0.0, my = 0.0, zlo = 1e99, zhi = -1e99;
-      for (auto & d : drawn)
-        for (dpt & p : d.second)
-          if (p.si == si) {
-            double z = db->db1d.station_vec[d.first].z;
-            n += 1.0; mz += z; my += p.y;
-            zlo = std::min(zlo, z); zhi = std::max(zhi, z);
-          }
-      if (zhi - zlo >= ELEVATION_SCALE) {
-        double szy = 0.0, szz = 0.0;
-        mz /= n; my /= n;
+      auto once = [&](size_t k) -> const dpt * {
+        const dpt * r = NULL;
+        auto it = drawn.find(k);
+        if (it != drawn.end())
+          for (const dpt & p : it->second)
+            if (p.si == si) {
+              if (r != NULL) return NULL;
+              r = &p;
+            }
+        return r;
+      };
+      std::vector<double> rs;
+      for (thdb1dl & l : db->db1d.leg_vec) {
+        if ((l.leg->flags & (TT_LEGFLAG_SPLAY | TT_LEGFLAG_SURFACE)) != 0) continue;
+        size_t a = db->db1d.station_vec[l.leg->from.id - 1].uid - 1, b = db->db1d.station_vec[l.leg->to.id - 1].uid - 1;
+        const dpt * pa = once(a), * pb = once(b);
+        if ((pa == NULL) || (pb == NULL)) continue;
+        const thdb1ds & sa = db->db1d.station_vec[a], & sb = db->db1d.station_vec[b];
+        double d = std::hypot(pb->x - pa->x, pb->y - pa->y), t = std::hypot(std::hypot(sb.x - sa.x, sb.y - sa.y), sb.z - sa.z);
+        if ((d > 0.0) && (t > 0.0)) rs.push_back(t / d);
+      }
+      if (!rs.empty()) {
+        std::nth_element(rs.begin(), rs.begin() + rs.size() / 2, rs.end());
+        ks = rs[rs.size() / 2];
         for (auto & d : drawn)
           for (dpt & p : d.second)
-            if (p.si == si) {
-              double z = db->db1d.station_vec[d.first].z - mz;
-              szy += z * (p.y - my); szz += z * z;
-            }
-        if (szy != 0.0) {
-          ky = szz / szy;
-          kx = std::fabs(ky);
-          for (auto & d : drawn)
-            for (dpt & p : d.second)
-              if (p.si == si) { p.x *= kx; p.y *= ky; }
-        }
+            if (p.si == si) { p.x *= ks; p.y *= ks; }
       }
       std::vector<ring2> rw;
       for (thscraplo * lo = cs->get_outline(); lo != NULL; lo = lo->next_outline) {
