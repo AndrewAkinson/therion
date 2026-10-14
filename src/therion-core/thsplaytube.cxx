@@ -32,6 +32,7 @@
 #include "thscrap.h"
 #include "thscrapis.h"
 #include "thpoint.h"
+#include "thline.h"
 #include "QuickHull.hpp"
 #include <poly2tri/poly2tri.h>
 
@@ -57,6 +58,9 @@ const double SECTION_ANGLE = 25.0;  // max. angle of section splays to the fitte
 const double TILTED_PLANE = 15.0;  // planes tilted more than this from vertical: splays judged in 3D only [deg]
 const double LEVEL_SPLAY = 45.0;  // splays inclined less than this are judged by their horizontal angle [deg]
 const double MAX_PLANE_TURN = 35.0;  // max. angle between fitted and reference plane [deg]
+const double XSECTION_CLEAR = 0.1;  // overlap difference with the splay polygon that decides which way a drawn section faces
+const double XSECTION_JOIN = 0.05;  // wall line ends of a drawn section this close are joined [m]
+const double XSECTION_EDGE = 0.1;  // a drawn section's station may be this far outside the drawing (on the wall) [m]
 const double JUNCTION_SITE = 0.5;  // spacing of the points along other legs that limit a junction footprint [m]
 const double JUNCTION_STRAIGHT = 70.0;  // junction leg pairs bending more than this are not a through passage [deg]
 const size_t JUNCTION_SPLAYS = 4;  // section splays needed for a cross section at a junction
@@ -68,6 +72,7 @@ const double BRANCH_OPENING = 1.5;  // a branch stops where its drawn width grow
 const double BRANCH_END = 1.0;  // and at the latest this far before the junction station [m]
 const double BRANCH_OVERLAP = 0.5;  // a branch that cannot be joined to its junction runs this far into it [m]
 const double ELEVATION_NEAR = 0.5;  // a leg outside the drawn elevation by up to this uses the nearest span [m]
+const double ELEVATION_SCALE = 0.5;  // an extended scrap whose stations span this height is scaled by them, else by -scale [m]
 const double ELEVATION_STEEP = 60.0;  // steeper legs are not scaled to the extended elevation [deg]
 const int OVAL_POINTS = 24;  // points round an oval section of a leg without splay sections
 const double OVAL_END = 1.0;  // an oval leg starts this far from a junction [m] (at most half the leg)
@@ -605,6 +610,12 @@ struct drawn_walls {
 struct drawn_elevation {
   std::vector<std::vector<ring2>> rings;
   std::map<size_t, std::vector<size_t>> station_scraps;
+  // the same scraps as drawn: scaled by the stations' heights (else by -scale)
+  // and flipped only, not rotated or fitted to the stations (m); and the station
+  // points drawn in each
+  std::vector<std::vector<ring2>> raw;
+  struct dpt { size_t si; double x, y; };
+  std::map<size_t, std::vector<dpt>> drawn;
 
   void collect(thdatabase * db) {
     thdb2dprjpr prjid = db->db2d.parse_projection("extended", false);
@@ -624,6 +635,25 @@ struct drawn_elevation {
       if (rr.empty()) continue;
       size_t si = rings.size();
       rings.push_back(rr);
+      // the outline as drawn, curves followed: the raw drawing with the scrap's
+      // own -scale and -flip only (as Therion does before fitting it to the stations)
+      double ms = cs->scale, mr = 0.0;
+      if (cs->scale_p9) {
+        double pd = std::hypot(cs->scale_p2x - cs->scale_p1x, cs->scale_p2y - cs->scale_p1y),
+          rd = std::hypot(cs->scale_r2x - cs->scale_r1x, cs->scale_r2y - cs->scale_r1y);
+        ms = (pd > 0.0) ? rd / pd : 1.0;
+        mr = atan2(cs->scale_r2y - cs->scale_r1y, cs->scale_r2x - cs->scale_r1x) - atan2(cs->scale_p2y - cs->scale_p1y, cs->scale_p2x - cs->scale_p1x);
+      }
+      double kx = 1.0, ky = 1.0;  // the scale (and up) from the stations' heights
+      auto drawn_xy = [&](const thdb2dpt * pt) {
+        std::array<double, 2> q = {ms * (cos(mr) * pt->x - sin(mr) * pt->y), ms * (sin(mr) * pt->x + cos(mr) * pt->y)};
+        if (cs->flip == TT_SCRAP_FLIP_HORIZ) q[0] = -q[0];
+        if (cs->flip == TT_SCRAP_FLIP_VERT) q[1] = -q[1];
+        return std::array<double, 2>{kx * q[0], ky * q[1]};
+      };
+      // the station points drawn in the scrap; then the scale from them: the drawn
+      // heights fitted to the stations' true heights (heights are neither folded
+      // nor mirrored in an extended elevation; -scale may be missing or wrong)
       for (th2ddataobject * o2 = cs->fs2doptr; o2 != NULL; o2 = o2->nscrapoptr) {
         if (o2->get_class_id() != TT_POINT_CMD) continue;
         thpoint * pp = dynamic_cast<thpoint*>(o2);
@@ -631,7 +661,58 @@ struct drawn_elevation {
         size_t k = db->db1d.station_vec[pp->station_name.id - 1].uid - 1;
         std::vector<size_t> & v = station_scraps[k];
         if (std::find(v.begin(), v.end(), si) == v.end()) v.push_back(si);
+        if (pp->type == TT_POINT_TYPE_STATION)
+          drawn[k].push_back({si, drawn_xy(pp->point)[0], drawn_xy(pp->point)[1]});
       }
+      double n = 0.0, mz = 0.0, my = 0.0, zlo = 1e99, zhi = -1e99;
+      for (auto & d : drawn)
+        for (dpt & p : d.second)
+          if (p.si == si) {
+            double z = db->db1d.station_vec[d.first].z;
+            n += 1.0; mz += z; my += p.y;
+            zlo = std::min(zlo, z); zhi = std::max(zhi, z);
+          }
+      if (zhi - zlo >= ELEVATION_SCALE) {
+        double szy = 0.0, szz = 0.0;
+        mz /= n; my /= n;
+        for (auto & d : drawn)
+          for (dpt & p : d.second)
+            if (p.si == si) {
+              double z = db->db1d.station_vec[d.first].z - mz;
+              szy += z * (p.y - my); szz += z * z;
+            }
+        if (szy != 0.0) {
+          ky = szz / szy;
+          kx = std::fabs(ky);
+          for (auto & d : drawn)
+            for (dpt & p : d.second)
+              if (p.si == si) { p.x *= kx; p.y *= ky; }
+        }
+      }
+      std::vector<ring2> rw;
+      for (thscraplo * lo = cs->get_outline(); lo != NULL; lo = lo->next_outline) {
+        ring2 r;
+        for (thscraplo * l2 = lo; l2 != NULL; l2 = l2->next_line) {
+          ring2 pts;
+          thdb2dlp * prev = NULL;
+          for (thdb2dlp * lp = l2->line->first_point; lp != NULL; lp = lp->nextlp) {
+            if ((prev != NULL) && (lp->cp1 != NULL) && (lp->cp2 != NULL)) {
+              auto p0 = drawn_xy(prev->point), c1 = drawn_xy(lp->cp1), c2 = drawn_xy(lp->cp2), p1 = drawn_xy(lp->point);
+              for (int k = 1; k < 20; k++) {
+                double t = k / 20.0, a = (1 - t) * (1 - t) * (1 - t), b = 3 * t * (1 - t) * (1 - t), c = 3 * t * t * (1 - t), d = t * t * t;
+                pts.push_back({a * p0[0] + b * c1[0] + c * c2[0] + d * p1[0], a * p0[1] + b * c1[1] + c * c2[1] + d * p1[1]});
+              }
+            }
+            pts.push_back(drawn_xy(lp->point));
+            prev = lp;
+          }
+          if (l2->mode == TT_OUTLINE_REVERSED) std::reverse(pts.begin(), pts.end());
+          for (auto & q : pts)
+            if (r.empty() || (std::hypot(q[0] - r.back()[0], q[1] - r.back()[1]) > 1e-6)) r.push_back(q);
+        }
+        if (r.size() >= 3) rw.push_back(r);
+      }
+      raw.push_back(rw);
     }
   }
 
@@ -649,6 +730,44 @@ struct drawn_elevation {
       std::sort(ys.begin(), ys.end());
       for (size_t k = 0; k + 1 < ys.size(); k += 2) res.push_back(std::make_pair(ys[k], ys[k + 1]));
     }
+    return res;
+  }
+
+  // the leg i -> j as drawn: of all pairs of drawn points of its two stations
+  // in one scrap (a station may be drawn twice: in two surveys' scraps where they
+  // join or overlap, or at both ends of a loop), the pair that best fits the leg
+  // (hl along, dz up), and the drawn position at fraction f along the leg
+  bool drawn_leg(size_t i, size_t j, double f, double hl, double dz, size_t & si, double & x, double & y, double * fit = NULL) const {
+    auto ii = drawn.find(i), jj = drawn.find(j);
+    if ((ii == drawn.end()) || (jj == drawn.end())) return false;
+    double best = 1e99;
+    const dpt * bi = NULL, * bj = NULL;
+    for (const dpt & a : ii->second)
+      for (const dpt & b : jj->second) {
+        if ((a.si != b.si) || raw[a.si].empty()) continue;
+        double sc = std::hypot(std::fabs(b.x - a.x) - hl, (b.y - a.y) - dz);
+        if (sc < best) { best = sc; bi = &a; bj = &b; }
+      }
+    if (bi == NULL) return false;
+    si = bi->si;
+    x = bi->x + f * (bj->x - bi->x);
+    y = bi->y + f * (bj->y - bi->y);
+    if (fit != NULL) *fit = best;
+    return true;
+  }
+
+  // all spans (floor, roof) of a scrap as drawn at x
+  std::vector<std::pair<double, double>> raw_spans(size_t si, double x) const {
+    std::vector<std::pair<double, double>> res;
+    std::vector<double> ys;
+    for (const ring2 & r : raw[si])
+      for (size_t k = 0, n = r.size(); k < n; k++) {
+        const auto & a = r[k], & b = r[(k + 1) % n];
+        if (((a[0] - x) * (b[0] - x) > 0.0) || (a[0] == b[0]) || (b[0] == x)) continue;
+        ys.push_back(a[1] + (x - a[0]) / (b[0] - a[0]) * (b[1] - a[1]));
+      }
+    std::sort(ys.begin(), ys.end());
+    for (size_t k = 0; k + 1 < ys.size(); k += 2) res.push_back(std::make_pair(ys[k], ys[k + 1]));
     return res;
   }
 
@@ -712,9 +831,177 @@ bool splay_body(const lxVec & c, const std::vector<lxVec> & splays, thdb3ddata &
 }
 
 
+
+namespace {
+
+// Cross-sections drawn in the plan: scraps with -projection none, each placed
+// with a `point section -scrap` and cut across the passage by a `line section`
+// (the one just before the point in the plan scrap). The section's station is
+// a station point in the section scrap if there is one, else the station point
+// at the middle of the cut. Where the station is in the section drawing: that
+// station point, else the `point section` if it lies within the drawing (the
+// section drawn in the plan's own drawing units, as SexyTopo exports it).
+struct drawn_xsection {
+  std::string scrap, plan;  // section scrap, and the plan scrap placing it
+  long station = -1;  // station index, -1 if not found
+  std::string linked;  // how the station was found
+  bool placed = false;  // where the station is in the drawing is known
+  std::string at;  // how that was found
+  lxVec cut;  // horizontal direction of the cut across the passage (model)
+  std::vector<std::array<double, 2>> pts;  // outline (m) from the station: across (cut direction), up
+};
+
+// metres per drawing unit of a scrap (its -scale), 0 if not known
+double scrap_metres(thscrap * cs) {
+  if (cs->scale_p9) {
+    double p = std::hypot(cs->scale_p2x - cs->scale_p1x, cs->scale_p2y - cs->scale_p1y),
+      r = std::hypot(cs->scale_r2x - cs->scale_r1x, cs->scale_r2y - cs->scale_r1y);
+    return (p > 0.0) ? r / p : 0.0;
+  }
+  return 0.0;
+}
+
+// points of a line (raw drawing units), curves followed
+std::vector<std::array<double, 2>> line_points(thline * ln) {
+  std::vector<std::array<double, 2>> res;
+  thdb2dlp * prev = NULL;
+  for (thdb2dlp * lp = ln->first_point; lp != NULL; lp = lp->nextlp) {
+    if ((prev != NULL) && (lp->cp1 != NULL) && (lp->cp2 != NULL)) {
+      double x0 = prev->point->x, y0 = prev->point->y;
+      for (int k = 1; k < 6; k++) {
+        double t = k / 6.0, a = (1 - t) * (1 - t) * (1 - t), b = 3 * t * (1 - t) * (1 - t), c = 3 * t * t * (1 - t), d = t * t * t;
+        res.push_back({a * x0 + b * lp->cp1->x + c * lp->cp2->x + d * lp->point->x,
+                       a * y0 + b * lp->cp1->y + c * lp->cp2->y + d * lp->point->y});
+      }
+    }
+    res.push_back({lp->point->x, lp->point->y});
+    prev = lp;
+  }
+  return res;
+}
+
+void collect_xsections(thdatabase * db, std::vector<drawn_xsection> & out) {
+  thdb2dprjpr prjid = db->db2d.parse_projection("plan", false);
+  if (prjid.newprj) return;
+  db->db2d.process_projection(prjid.prj);
+  auto station_of = [&](thpoint * pp) {
+    return (long) db->db1d.station_vec[pp->station_name.id - 1].uid - 1;
+  };
+  for (thscrap * cs = prjid.prj->first_scrap; cs != NULL; cs = cs->proj_next_scrap) {
+    if (!cs->fsptr->is_selected()) continue;
+    double mp = scrap_metres(cs);
+    thline * cut = NULL;
+    for (th2ddataobject * o2 = cs->fs2doptr; o2 != NULL; o2 = o2->nscrapoptr) {
+      if (o2->get_class_id() == TT_LINE_CMD) {
+        thline * ln = dynamic_cast<thline*>(o2);
+        if ((ln->type == TT_LINE_TYPE_SECTION) && (ln->first_point != NULL) && (ln->first_point != ln->last_point)) cut = ln;
+        continue;
+      }
+      if (o2->get_class_id() != TT_POINT_CMD) continue;
+      thpoint * sp = dynamic_cast<thpoint*>(o2);
+      if ((sp->type != TT_POINT_TYPE_SECTION) || (sp->get_scrap() == nullptr)) continue;
+      thscrap * xs = sp->get_scrap();
+      drawn_xsection d;
+      d.scrap = xs->name;
+      d.plan = cs->name;
+      double xm = scrap_metres(xs);
+      // the station: a station point in the section scrap, else at the middle of the cut
+      thpoint * xst = NULL;
+      for (th2ddataobject * x2 = xs->fs2doptr; x2 != NULL; x2 = x2->nscrapoptr)
+        if ((x2->get_class_id() == TT_POINT_CMD) && (dynamic_cast<thpoint*>(x2)->type == TT_POINT_TYPE_STATION) &&
+            (dynamic_cast<thpoint*>(x2)->station_name.id != 0)) xst = dynamic_cast<thpoint*>(x2);
+      if (xst != NULL) {
+        d.station = station_of(xst);
+        d.linked = "station point in the section";
+      }
+      if (cut != NULL) {
+        double mx = 0.5 * (cut->first_point->point->x + cut->last_point->point->x),
+          my = 0.5 * (cut->first_point->point->y + cut->last_point->point->y), best = 1e99;
+        thpoint * bp = NULL;
+        for (th2ddataobject * x2 = cs->fs2doptr; x2 != NULL; x2 = x2->nscrapoptr) {
+          if (x2->get_class_id() != TT_POINT_CMD) continue;
+          thpoint * pp = dynamic_cast<thpoint*>(x2);
+          if ((pp->type != TT_POINT_TYPE_STATION) || (pp->station_name.id == 0)) continue;
+          double dd = std::hypot(pp->point->x - mx, pp->point->y - my);
+          if (dd < best) { best = dd; bp = pp; }
+        }
+        if ((bp != NULL) && (mp > 0.0) && (best * mp < 0.5)) {
+          long k = station_of(bp);
+          if (d.station < 0) { d.station = k; d.linked = "station at the middle of the cut"; }
+          else if (d.station != k) d.linked += " (the cut is at another station)";
+          else d.linked += " and at the middle of the cut";
+        }
+        lxVec a(cut->first_point->point->xt, cut->first_point->point->yt, 0.0), b(cut->last_point->point->xt, cut->last_point->point->yt, 0.0);
+        d.cut = b - a;
+        if (d.cut.Length() > 1e-9) d.cut.Normalize();
+      }
+      // the outline, from the station's place in the drawing: the wall lines
+      // (of any subtype, as a debris floor) joined end to end, from the longest;
+      // a gap left is closed straight across
+      std::vector<std::vector<std::array<double, 2>>> wls;
+      for (th2ddataobject * x2 = xs->fs2doptr; x2 != NULL; x2 = x2->nscrapoptr)
+        if ((x2->get_class_id() == TT_LINE_CMD) && (dynamic_cast<thline*>(x2)->type == TT_LINE_TYPE_WALL)) {
+          std::vector<std::array<double, 2>> lp = line_points(dynamic_cast<thline*>(x2));
+          if (lp.size() > 1) wls.push_back(lp);
+        }
+      size_t nwalls = wls.size(), njoined = 0;
+      std::vector<std::array<double, 2>> raw;
+      if (!wls.empty()) {
+        std::sort(wls.begin(), wls.end(), [](const std::vector<std::array<double, 2>> & a, const std::vector<std::array<double, 2>> & b) { return a.size() > b.size(); });
+        raw = wls[0];
+        std::vector<bool> done(wls.size(), false);
+        done[0] = true;
+        njoined = 1;
+        double tol = (xm > 0.0) ? XSECTION_JOIN / xm : 0.0;
+        for (bool more = true; more;) {
+          more = false;
+          for (size_t w = 1; w < wls.size(); w++) {
+            if (done[w]) continue;
+            const auto & e = raw.back();
+            const auto & a = wls[w].front(), & b = wls[w].back();
+            if (std::hypot(a[0] - e[0], a[1] - e[1]) <= tol) raw.insert(raw.end(), wls[w].begin() + 1, wls[w].end());
+            else if (std::hypot(b[0] - e[0], b[1] - e[1]) <= tol) raw.insert(raw.end(), wls[w].rbegin() + 1, wls[w].rend());
+            else {
+              const auto & f = raw.front();
+              if (std::hypot(b[0] - f[0], b[1] - f[1]) <= tol) raw.insert(raw.begin(), wls[w].begin(), wls[w].end() - 1);
+              else if (std::hypot(a[0] - f[0], a[1] - f[1]) <= tol) raw.insert(raw.begin(), wls[w].rbegin(), wls[w].rend() - 1);
+              else continue;
+            }
+            done[w] = true;
+            njoined++;
+            more = true;
+          }
+        }
+      }
+      double ox = 0.0, oy = 0.0;
+      if (xst != NULL) {
+        ox = xst->point->x; oy = xst->point->y; d.placed = true; d.at = "station point";
+      } else if (!raw.empty()) {
+        double x0 = 1e99, x1 = -1e99, y0 = 1e99, y1 = -1e99;
+        for (auto & q : raw) { x0 = std::min(x0, q[0]); x1 = std::max(x1, q[0]); y0 = std::min(y0, q[1]); y1 = std::max(y1, q[1]); }
+        // a station on the wall can be just outside the drawing
+        double px = sp->point->x, py = sp->point->y, tol = (xm > 0.0) ? XSECTION_EDGE / xm : 0.0;
+        if ((px >= x0 - tol) && (px <= x1 + tol) && (py >= y0 - tol) && (py <= y1 + tol)) { ox = px; oy = py; d.placed = true; d.at = "point section"; }
+        else d.at = "not known (point section outside the drawing)";
+      }
+      if ((xm <= 0.0) || raw.empty()) {
+        d.placed = false;
+        d.at = raw.empty() ? "no wall line" : "section scale not known";
+      }
+      for (auto & q : raw) d.pts.push_back({(q[0] - ox) * xm, (q[1] - oy) * xm});
+      if (nwalls > 1) d.at += fmt::format(" ({} of {} wall lines joined)", njoined, nwalls);
+      if (cut == NULL) d.linked += " (no cut before it)";
+      out.push_back(d);
+      cut = NULL;
+    }
+  }
+}
+
+}  // namespace
+
 void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section_splays,
   thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays,
-  thdb3ddata & map_tubes, thdb3ddata & map_junctions, thdb3ddata & map_fills)
+  thdb3ddata & map_tubes, thdb3ddata & map_junctions, thdb3ddata & map_fills, thdb3ddata & drawn_sections)
 {
   thdb1d & d1 = db->db1d;
   thdb1d_tree_node * nodes = d1.get_tree_nodes();
@@ -1037,6 +1324,160 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     nsections++;
   }
 
+
+  // Drawn cross-sections (see collect_xsections), shown beside the section
+  // polygons from splays for comparison: upright through the station, across
+  // the passage along the cut. Which way the drawing faces is not recorded
+  // (the cuts are `-direction both`): of the drawing and its mirror image, the
+  // one overlapping the station's splay polygon more is used; at stations
+  // without one, the way most others face.
+  std::vector<drawn_xsection> xsecs;
+  std::string xsreport;
+  size_t nxsplaced = 0, nxsused = 0;
+  std::vector<bool> drawnsec(nst, false);  // the station's section is a drawn one
+  collect_xsections(db, xsecs);
+  {
+    // overlap (intersection over union) of two polygons, on a grid
+    auto overlap = [](const std::vector<std::array<double, 2>> & a, const std::vector<std::array<double, 2>> & b) {
+      if ((a.size() < 3) || (b.size() < 3)) return -1.0;
+      ring2 ra(a.begin(), a.end()), rb(b.begin(), b.end());
+      double x0 = 1e99, x1 = -1e99, y0 = 1e99, y1 = -1e99;
+      for (const ring2 * r : {&ra, &rb})
+        for (auto & q : *r) { x0 = std::min(x0, q[0]); x1 = std::max(x1, q[0]); y0 = std::min(y0, q[1]); y1 = std::max(y1, q[1]); }
+      int ni = 0, nu = 0;
+      const int G = 80;
+      for (int i = 0; i < G; i++)
+        for (int j = 0; j < G; j++) {
+          double x = x0 + (i + 0.5) * (x1 - x0) / G, y = y0 + (j + 0.5) * (y1 - y0) / G;
+          bool ia = in_ring(ra, x, y), ib = in_ring(rb, x, y);
+          if (ia && ib) ni++;
+          if (ia || ib) nu++;
+        }
+      return (nu > 0) ? double(ni) / nu : 0.0;
+    };
+    // forward along the survey at a station: the leg arriving there (else the one leaving)
+    auto forward = [&](size_t i) {
+      lxVec f(0.0, 0.0, 0.0);
+      thdb1ds & si = d1.station_vec[i];
+      for (thdb1d_tree_arrow * ar = nodes[i].first_arrow; ar != NULL; ar = ar->next_arrow) {
+        if ((ar->leg->leg->flags & (TT_LEGFLAG_SPLAY | TT_LEGFLAG_SURFACE)) != 0) continue;
+        thdb1ds & sj = d1.station_vec[ar->end_node->uid - 1];
+        lxVec d(si.x - sj.x, si.y - sj.y, 0.0);
+        if (ar->is_reversed) return d;  // leg from j to i
+        if (f.Length() < 1e-9) f = -1.0 * d;
+      }
+      return f;
+    };
+    std::vector<int> mirror(xsecs.size(), 0);
+    std::vector<double> ov(xsecs.size(), -1.0), ovm(xsecs.size(), -1.0);
+    int nfwd = 0, nback = 0;
+    for (size_t k = 0; k < xsecs.size(); k++) {
+      drawn_xsection & d = xsecs[k];
+      if ((d.station < 0) || !d.placed || (d.cut.Length() < 1e-9) || !sec[d.station].ok) continue;
+      section & s = sec[d.station];
+      std::vector<std::array<double, 2>> sp, dm;
+      for (size_t q = 0; q < s.q.size(); q++) {
+        lxVec P = s.point(q) - s.c;
+        sp.push_back({P * d.cut, P.z});
+      }
+      for (auto & q : d.pts) dm.push_back({-q[0], q[1]});
+      ov[k] = overlap(d.pts, sp);
+      ovm[k] = overlap(dm, sp);
+      // only a clear difference decides it; otherwise the way most others face
+      if (std::fabs(ov[k] - ovm[k]) < XSECTION_CLEAR) continue;
+      mirror[k] = (ovm[k] > ov[k]) ? -1 : 1;
+      lxVec f = forward(d.station), right(f.y, -f.x, 0.0);
+      if ((mirror[k] * (d.cut * right)) > 0.0) nfwd++; else nback++;
+    }
+    for (size_t k = 0; k < xsecs.size(); k++) {
+      drawn_xsection & d = xsecs[k];
+      std::string sname = (d.station >= 0) ? fmt::format("{}@{}", d1.station_vec[d.station].name, d1.station_vec[d.station].survey->full_name) : "?";
+      if ((d.station < 0) || !d.placed || (d.cut.Length() < 1e-9)) {
+        xsreport += fmt::format("{:>20} {:>20}  station {}: not placed ({}; {})\n", d.scrap, d.plan, sname, d.linked, d.at);
+        continue;
+      }
+      thdb1ds & st = d1.station_vec[d.station];
+      lxVec c(st.x, st.y, st.z), f = forward(d.station), right(f.y, -f.x, 0.0);
+      std::string facing = "by overlap with the splay polygon";
+      if (mirror[k] == 0) {  // no splay polygon, or no clear difference: the way most others face
+        facing = "as most others";
+        int want = (nfwd >= nback) ? 1 : -1;
+        mirror[k] = ((d.cut * right) * want > 0.0) ? 1 : -1;
+      }
+      lxVec across = double(mirror[k]) * d.cut;
+      thdb3dfc * fc = drawn_sections.insert_face(THDB3DFC_LINE_STRIP);
+      thdb3dvx * first = NULL;
+      double a0 = 1e99, a1 = -1e99, z0 = 1e99, z1 = -1e99;
+      for (auto & q : d.pts) {
+        thdb3dvx * v = drawn_sections.insert_vertex(c + q[0] * across + lxVec(0.0, 0.0, q[1]));
+        fc->insert_vertex(v);
+        if (first == NULL) first = v;
+        a0 = std::min(a0, q[0]); a1 = std::max(a1, q[0]); z0 = std::min(z0, q[1]); z1 = std::max(z1, q[1]);
+      }
+      fc->insert_vertex(first);
+      nxsplaced++;
+      std::string cmp = "no splay polygon";
+      if (sec[d.station].ok) {
+        section & s = sec[d.station];
+        double b0 = 1e99, b1 = -1e99, w0 = 1e99, w1 = -1e99;
+        for (size_t q = 0; q < s.q.size(); q++) {
+          lxVec P = s.point(q) - s.c;
+          double a = P * across;
+          b0 = std::min(b0, a); b1 = std::max(b1, a); w0 = std::min(w0, P.z); w1 = std::max(w1, P.z);
+        }
+        cmp = fmt::format("drawn {:.2f} x {:.2f} m, splays {:.2f} x {:.2f} m; overlap {:.2f} (mirrored {:.2f})",
+          a1 - a0, z1 - z0, b1 - b0, w1 - w0, std::max(ov[k], ovm[k]), std::min(ov[k], ovm[k]));
+      }
+      // The drawn section becomes the station's section (at passage stations and
+      // junctions with a through passage): its plane, its outline as corners;
+      // anchors, joining and tubes as for sections from splays. The section
+      // polygon from splays is still shown.
+      std::string used;
+      if ((nbrs[d.station].size() > 2) && (thru[d.station].first >= nst)) used = "; at a junction without a through passage: shown only";
+      else if (drawnsec[d.station]) used = "; the station already has a drawn section: shown only";
+      else {
+        std::vector<lxVec> q;
+        for (auto & p : d.pts)
+          if (q.empty() || (std::hypot(p[0] - q.back().x, p[1] - q.back().y) > 1e-3)) q.push_back(lxVec(p[0], p[1], 0.0));
+        if ((q.size() > 1) && (std::hypot(q[0].x - q.back().x, q[0].y - q.back().y) <= 1e-3)) q.pop_back();
+        double ar = 0.0, gx = 0.0, gy = 0.0;
+        for (size_t m = 0; m < q.size(); m++) {
+          const lxVec & q0 = q[m], & q1 = q[(m + 1) % q.size()];
+          double cr = cross2(q0.x, q0.y, q1.x, q1.y);
+          ar += cr; gx += (q0.x + q1.x) * cr; gy += (q0.y + q1.y) * cr;
+        }
+        if ((q.size() < 3) || (std::fabs(ar) < 1e-4)) used = "; no area: shown only";
+        else {
+          if (ar < 0.0) std::reverse(q.begin(), q.end());  // anticlockwise looking along the passage
+          section & s = sec[d.station];
+          bool was = s.ok;
+          s.c = c;
+          s.u = across;
+          s.v = up;
+          s.n = up ^ across;
+          s.n.Normalize();
+          s.cx = gx / (3.0 * ar);
+          s.cy = gy / (3.0 * ar);
+          s.q = q;
+          s.pos.clear();
+          s.moved.clear();
+          if (!s.set_positions()) used = ", anchors out of order";
+          s.vx.clear();
+          for (size_t m = 0; m < s.q.size(); m++) s.vx.push_back(walls.insert_vertex(s.point(m)));
+          s.ok = true;
+          if (!was) nsections++;
+          drawnsec[d.station] = true;
+          nxsused++;
+          used = "; used as the station's section" + used + s.moved;
+        }
+      }
+      xsreport += fmt::format("{:>20} {:>20}  station {}: {}; station in the drawing at the {}; looking {} the survey ({}); {}{}\n",
+        d.scrap, d.plan, sname, d.linked, d.at, ((across * right) > 0.0) ? "along" : "against", facing, cmp, used);
+    }
+    if (!xsecs.empty())
+      xsreport = fmt::format("faces looking along the survey {}, against {} (by overlap with the splay polygon)\n", nfwd, nback) + xsreport;
+  }
+
   // bodies at junctions and at stations without a section (not passage ends)
   size_t nbodies = 0;
   std::vector<bool> body(nst, false);
@@ -1155,6 +1596,13 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     std::vector<size_t> both, either;
     ud.clear();
     if (!leg_ext(i, j, f, x, z, both, either)) return false;
+    size_t rsi;
+    double rx, ry;
+    thdb1ds & si = d1.station_vec[i], & sj = d1.station_vec[j];
+    if (elev.drawn_leg(i, j, f, std::hypot(sj.x - si.x, sj.y - si.y), sj.z - si.z, rsi, rx, ry)) {  // as drawn
+      for (auto & p : elev.raw_spans(rsi, rx)) ud.push_back(std::make_pair(p.second - ry, ry - p.first));
+      return !ud.empty();
+    }
     std::vector<std::pair<double, double>> sp = elev.spans(both, x);
     if (sp.empty()) sp = elev.spans(either, x);
     for (auto & p : sp) ud.push_back(std::make_pair(p.second - z, z - p.first));
@@ -1193,6 +1641,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       have = true;
     }
   };
+  std::set<std::pair<size_t, size_t>> elevlegs_drawn, elevlegs_placed;
   auto leg_elevation = [&](size_t i, size_t j, double f, double & floor, double & roof) {
     if (elev.rings.empty()) return false;
     for (thdb1d_tree_arrow * ar = nodes[i].first_arrow; ar != NULL; ar = ar->next_arrow) {
@@ -1215,6 +1664,23 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         for (size_t s2 : jj->second)
           if (std::find(either.begin(), either.end(), s2) == either.end()) either.push_back(s2);
       double x = xi + f * (xj - xi), z = si.z + f * dz;
+      // as drawn: the leg's place in a scrap with both stations drawn in it
+      size_t rsi;
+      double rx, ry;
+      if (elev.drawn_leg(i, j, f, hl, dz, rsi, rx, ry)) {
+        double best = -1.0;
+        for (auto & p : elev.raw_spans(rsi, rx)) {
+          double d = (ry < p.first) ? p.first - ry : ((ry > p.second) ? ry - p.second : 0.0);
+          if ((d <= ELEVATION_NEAR) && ((best < 0.0) || (d < best))) {
+            best = d;
+            floor = z + (p.first - ry);
+            roof = z + (p.second - ry);
+          }
+        }
+        elevlegs_drawn.insert(std::make_pair(std::min(i, j), std::max(i, j)));
+        return best >= 0.0;
+      }
+      elevlegs_placed.insert(std::make_pair(std::min(i, j), std::max(i, j)));
       if (!both.empty() && elev.span(both, x, z, floor, roof)) return true;
       return elev.span(either, x, z, floor, roof);
     }
@@ -1273,6 +1739,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   auto station_ring = [&](size_t i) {  // a station section stretched to the drawn walls
     std::vector<lxVec> P;
     for (size_t k = 0; k < sec[i].q.size(); k++) P.push_back(sec[i].point(k));
+    if (drawnsec[i]) return P;  // a drawn section wins at its own station
     std::string where = fmt::format("{}@{}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name);
     stretch(P, sec[i].c, horizontal(sec[i].u), where);
     double ef, er;
@@ -1601,11 +2068,14 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
           h = horizontal(h);
           std::string where = fmt::format("{}@{} - {} {:.0f}%", d1.station_vec[i].name,
             d1.station_vec[i].survey->full_name, d1.station_vec[j].name, 100.0 * f);
-          stretch(P, c, h, where);
-          double ef, er;
-          bool ok = (m == 0) ? station_elevation(i, ef, er) : ((m == nseg) ? station_elevation(j, ef, er)
-            : leg_elevation(i, j, f, ef, er));
-          if (ok) vstretch(P, ef, er, where);
+          // a drawn section wins at its own station
+          if (!(((m == 0) && drawnsec[i]) || ((m == nseg) && drawnsec[j]))) {
+            stretch(P, c, h, where);
+            double ef, er;
+            bool ok = (m == 0) ? station_elevation(i, ef, er) : ((m == nseg) ? station_elevation(j, ef, er)
+              : leg_elevation(i, j, f, ef, er));
+            if (ok) vstretch(P, ef, er, where);
+          }
           std::vector<thdb3dvx *> cur = ring(P);
           if (m > 0) loft(prev, cur);
           prev = cur;
@@ -2177,6 +2647,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     "{:>20} {:>4} {:>6} {:>4}  {:>5} {:>6} {:>5} {:>6}  {}\n{}",
     CANDIDATE_ANGLE, SECTION_ANGLE, LEVEL_SPLAY, TILTED_PLANE, "STATION", "LEGS", "SPLAYS", "USED", "TURN", "SPREAD", "WORST", "CENTRE", "PLANE",
     report));
+  thlog(fmt::format("\nDrawn cross-sections (scraps with -projection none placed in the plan): {} found, {} placed, "
+    "{} used as their station's section (not stretched to the drawn plan or elevation there).\n{}",
+    xsecs.size(), nxsplaced, nxsused, xsreport));
   thlog(fmt::format("\nJunctions with a cross section (legs within {:.0f} deg of straight on, fitted plane,\n"
     "at least {} section splays, all round the passage): {} of {}.\n{}",
     JUNCTION_STRAIGHT, JUNCTION_SPLAYS, njsections, njunctions, jsreport));
@@ -2534,6 +3007,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       nstretched, nrings, nlegspaced, thsplaytube_opt.spacing_change, thsplaytube_opt.spacing_min, thsplaytube_opt.spacing_max));
     thlog(fmt::format("Sections with (almost) nothing on one side, stretched as a whole across the drawn width: {}.\n", nwhole));
     thlog(fmt::format("Rings scaled to the extended elevation: {} ({} extended scraps).\n", nvscaled, elev.rings.size()));
+    thlog(fmt::format("Legs read from the extended elevation as drawn (both stations in one scrap): {}; "
+      "from the scraps as Therion places them: {}.\n", elevlegs_drawn.size(), elevlegs_placed.size()));
     thlog(fmt::format("Legs without sections drawn as ovals from the drawn LRUD: {} ({} rings).\n", novallegs, novalrings));
     thlog(fmt::format("Legs to drawn dead ends without a section, the section carried to the end wall: {}.\n", ndeadends));
     thlog(fmt::format("Passages drawn without legs or splays (deeper than their opening, at least {:.1f} m): {} ({:.1f} m2).\n{}"

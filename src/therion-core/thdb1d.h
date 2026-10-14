@@ -287,7 +287,7 @@ class thdb1d {
   
   thdb3ddata d3_data, d3_surface, d3_walls, d3_splay,
     d3_splay_tubes, d3_section_splays, d3_section_polygons, d3_splay_junctions, d3_virtual_splays,
-    d3_map_tubes, d3_map_junctions, d3_map_fills;
+    d3_map_tubes, d3_map_junctions, d3_map_fills, d3_drawn_sections;
 
   thattr m_station_attr;
 
@@ -430,6 +430,7 @@ class thdb1d {
   thdb3ddata * get_3d_map_tubes();  ///< Model from maps and sections.
   thdb3ddata * get_3d_map_junctions();  ///< Junctions of the model from maps and sections.
   thdb3ddata * get_3d_map_fills();  ///< Passages drawn in the plan without legs or splays.
+  thdb3ddata * get_3d_drawn_sections();  ///< Cross-sections drawn in the plan, placed at their stations.
     
 };
 

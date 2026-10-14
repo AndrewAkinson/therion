@@ -51,6 +51,7 @@
  *   along the legs, stretched sideways to the drawn plan walls.
  * @param map_junctions Output junctions of that model, from the drawn outline.
  * @param map_fills Output passages drawn in the plan without legs or splays.
+ * @param drawn_sections Output cross-sections drawn in the plan, placed at their stations (closed lines).
  */
 
 /**
@@ -68,6 +69,6 @@ extern thsplaytube_options thsplaytube_opt;
 
 void thsplaytube_build(class thdatabase * db, thdb3ddata & walls, thdb3ddata & section_splays,
   thdb3ddata & polygons, thdb3ddata & junctions, thdb3ddata & virtual_splays,
-  thdb3ddata & map_tubes, thdb3ddata & map_junctions, thdb3ddata & map_fills);
+  thdb3ddata & map_tubes, thdb3ddata & map_junctions, thdb3ddata & map_fills, thdb3ddata & drawn_sections);
 
 #endif

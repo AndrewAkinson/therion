@@ -2716,7 +2716,7 @@ void thdb1d::process_splay_tubes() {
   this->d3_splay_tubes_parsed = true;
   thsplaytube_build(&thdb, this->d3_splay_tubes, this->d3_section_splays,
     this->d3_section_polygons, this->d3_splay_junctions, this->d3_virtual_splays,
-    this->d3_map_tubes, this->d3_map_junctions, this->d3_map_fills);
+    this->d3_map_tubes, this->d3_map_junctions, this->d3_map_fills, this->d3_drawn_sections);
 }
 
 
@@ -2765,6 +2765,12 @@ thdb3ddata * thdb1d::get_3d_map_junctions() {
 thdb3ddata * thdb1d::get_3d_map_fills() {
   this->process_splay_tubes();
   return &(this->d3_map_fills);
+}
+
+
+thdb3ddata * thdb1d::get_3d_drawn_sections() {
+  this->process_splay_tubes();
+  return &(this->d3_drawn_sections);
 }
 
 
