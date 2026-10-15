@@ -2408,17 +2408,6 @@ std::string thexpmodel::get_gltf_data(class thdatabase * dbp) {
   if ((this->items & TT_EXPMODEL_ITEM_WALLS) != 0) {
     if ((this->wallsrc & TT_WSRC_CENTERLINE) != 0)
       add(dbp->db1d.get_3d_walls(), "LRUD walls", "walls-centreline", 4, 0.9f, 0.9f, 0.9f, 1.0f);
-    if ((this->wallsrc & TT_WSRC_MAPS) != 0) {
-      thdb2dprjpr prjid = dbp->db2d.parse_projection("plan",false);
-      if (!prjid.newprj) {
-        thdb.db2d.process_projection(prjid.prj);
-        for (thscrap * cs = prjid.prj->first_scrap; cs != NULL; cs = cs->proj_next_scrap) {
-          if (cs->fsptr->is_selected())
-            add(cs->get_3d_outline(), fmt::format("{}@{}", cs->name, cs->fsptr->full_name),
-                "walls-maps", 4, 0.85f, 0.75f, 0.6f, 1.0f);
-        }
-      }
-    }
     if ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0) {
       add(dbp->db1d.get_3d_splay_tubes(), "splay tubes", "walls-splay-tubes", 4, 0.75f, 0.8f, 0.95f, 1.0f);
       add(dbp->db1d.get_3d_section_splays(), "section splays", "section-splays", 1, 1.0f, 0.8f, 0.2f, 1.0f);

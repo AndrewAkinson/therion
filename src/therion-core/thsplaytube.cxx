@@ -72,7 +72,8 @@ const double BRANCH_OPENING = 1.5;  // a branch stops where its drawn width grow
 const double BRANCH_END = 1.0;  // and at the latest this far before the junction station [m]
 const double BRANCH_OVERLAP = 0.5;  // a branch that cannot be joined to its junction runs this far into it [m]
 const double ELEVATION_NEAR = 0.5;  // a leg outside the drawn elevation by up to this uses the nearest span [m]
-const double ELEVATION_STEEP = 60.0;  // steeper legs are not scaled to the extended elevation [deg]
+const double ELEVATION_STEEP = 60.0;  // a steeper leg reads the extended elevation across it, not vertically [deg]
+const double ELEVATION_LEVEL = 0.05;  // a leg shorter than this in plan or in the drawing gives no direction [m]
 const int OVAL_POINTS = 24;  // points round an oval section of a leg without splay sections
 const double OVAL_END = 1.0;  // an oval leg starts this far from a junction [m] (at most half the leg)
 const double FILL_CELL = 0.1;  // grid for finding drawn plan not covered by the model [m]
@@ -111,6 +112,7 @@ struct section {
 };
 
 double deg(double rad);
+double rad(double deg);
 
 // Corner positions along the polygon, 0-400, anticlockwise looking along the
 // passage. The rightmost (R), highest (T), leftmost (L) and lowest (B)
@@ -269,6 +271,10 @@ bool section::set_positions()
 
 double deg(double rad) {
   return rad / M_PI * 180.0;
+}
+
+double rad(double deg) {
+  return deg / 180.0 * M_PI;
 }
 
 // Angle between a direction and a plane given by its unit normal [deg].
@@ -740,7 +746,9 @@ struct drawn_elevation {
   // in one scrap (a station may be drawn twice: in two surveys' scraps where they
   // join or overlap, or at both ends of a loop), the pair that best fits the leg
   // (hl along, dz up), and the drawn position at fraction f along the leg
-  bool drawn_leg(size_t i, size_t j, double f, double hl, double dz, size_t & si, double & x, double & y, double * fit = NULL) const {
+  // (along: how far j is drawn from i along the scrap, signed)
+  bool drawn_leg(size_t i, size_t j, double f, double hl, double dz, size_t & si, double & x, double & y,
+                 double * fit = NULL, double * along = NULL) const {
     auto ii = drawn.find(i), jj = drawn.find(j);
     if ((ii == drawn.end()) || (jj == drawn.end())) return false;
     double best = 1e99;
@@ -756,21 +764,26 @@ struct drawn_elevation {
     x = bi->x + f * (bj->x - bi->x);
     y = bi->y + f * (bj->y - bi->y);
     if (fit != NULL) *fit = best;
+    if (along != NULL) *along = bj->x - bi->x;
     return true;
   }
 
-  // all spans (floor, roof) of a scrap as drawn at x
-  std::vector<std::pair<double, double>> raw_spans(size_t si, double x) const {
+  // all spans of a scrap as drawn on the line through (x, y) in direction
+  // (dx, dy) (a unit vector; (0, 1) = floor and roof above and below x), as
+  // distances along it from (x, y)
+  std::vector<std::pair<double, double>> raw_spans(size_t si, double x, double y, double dx, double dy) const {
     std::vector<std::pair<double, double>> res;
-    std::vector<double> ys;
+    std::vector<double> ts;
     for (const ring2 & r : raw[si])
       for (size_t k = 0, n = r.size(); k < n; k++) {
         const auto & a = r[k], & b = r[(k + 1) % n];
-        if (((a[0] - x) * (b[0] - x) > 0.0) || (a[0] == b[0]) || (b[0] == x)) continue;
-        ys.push_back(a[1] + (x - a[0]) / (b[0] - a[0]) * (b[1] - a[1]));
+        double sa = dx * (a[1] - y) - dy * (a[0] - x), sb = dx * (b[1] - y) - dy * (b[0] - x);
+        if ((sa * sb > 0.0) || (sa == sb) || (sb == 0.0)) continue;  // a vertex is counted once
+        double u = sa / (sa - sb);
+        ts.push_back((a[0] + u * (b[0] - a[0]) - x) * dx + (a[1] + u * (b[1] - a[1]) - y) * dy);
       }
-    std::sort(ys.begin(), ys.end());
-    for (size_t k = 0; k + 1 < ys.size(); k += 2) res.push_back(std::make_pair(ys[k], ys[k + 1]));
+    std::sort(ts.begin(), ts.end());
+    for (size_t k = 0; k + 1 < ts.size(); k += 2) res.push_back(std::make_pair(ts[k], ts[k + 1]));
     return res;
   }
 
@@ -1562,18 +1575,22 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   // scraps drawing both its stations (else either); steep or hidden legs are skipped.
   size_t nvscaled = 0;
   std::string vreport;
-  // the leg's position along the extended elevation at f, its height, and the
-  // scraps to use (both stations' scraps if any, else either's)
+  auto steep_leg = [&](size_t a, size_t b) {
+    thdb1ds & sa = d1.station_vec[a], & sb = d1.station_vec[b];
+    return deg(atan2(std::fabs(sb.z - sa.z), std::hypot(sb.x - sa.x, sb.y - sa.y))) > ELEVATION_STEEP;
+  };
+  // the leg's position along the extended elevation at f, its height, the
+  // scraps to use (both stations' scraps if any, else either's), and whether
+  // it is steeper than ELEVATION_STEEP; hidden legs are skipped
   auto leg_ext = [&](size_t i, size_t j, double f, double & x, double & z,
-                     std::vector<size_t> & both, std::vector<size_t> & either) {
+                     std::vector<size_t> & both, std::vector<size_t> & either, bool & steep) {
     if (elev.rings.empty()) return false;
     for (thdb1d_tree_arrow * ar = nodes[i].first_arrow; ar != NULL; ar = ar->next_arrow) {
       thdataleg * l = ar->leg->leg;
       if (((l->flags & (TT_LEGFLAG_SPLAY | TT_LEGFLAG_SURFACE)) != 0) || (ar->end_node->uid - 1 != j)) continue;
       if ((l->extend & TT_EXTENDFLAG_HIDE) != 0) return false;
-      thdb1ds & si = d1.station_vec[i], & sj = d1.station_vec[j];
-      double hl = std::hypot(sj.x - si.x, sj.y - si.y), dz = sj.z - si.z;
-      if (deg(atan2(std::fabs(dz), hl)) > ELEVATION_STEEP) return false;
+      thdb1ds & si = d1.station_vec[i];
+      steep = steep_leg(i, j);
       double xi = ar->is_reversed ? l->txx : l->fxx, xj = ar->is_reversed ? l->fxx : l->txx;
       both.clear();
       either.clear();
@@ -1588,24 +1605,113 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         for (size_t s2 : jj->second)
           if (std::find(either.begin(), either.end(), s2) == either.end()) either.push_back(s2);
       x = xi + f * (xj - xi);
-      z = si.z + f * dz;
+      z = si.z + f * (d1.station_vec[j].z - si.z);
       return true;
     }
     return false;
   };
-  // all drawn spans at f along the leg, relative to the leg's height (up, down)
-  auto leg_spans = [&](size_t i, size_t j, double f, std::vector<std::pair<double, double>> & ud) {
+  // Which way the extended elevation is read across a leg: an angle from
+  // vertical, leaning towards the leg's forward direction, taken at each end
+  // station and interpolated along the leg. At a station with a section: the
+  // section's own up direction (so the drawing is read in the section's plane;
+  // both legs steeper than ELEVATION_STEEP give a level section, read across).
+  // At a station without one, between two legs: vertical if neither leg is
+  // steep, horizontal if both are, else square to the legs' bisector seen from
+  // the side. At dead ends and junctions without a section, from the leg alone.
+  // (To be reviewed with more vertical caves.)
+  auto other_leg = [&](size_t s, size_t not_this) {
+    return (nbrs[s].size() == 2) ? ((nbrs[s][0] == not_this) ? nbrs[s][1] : nbrs[s][0]) : nst;
+  };
+  // legs giving the leg i -> j's forward direction in plan: itself, else (about
+  // vertical) the leg before it, else the one after it
+  auto forward_legs = [&](size_t i, size_t j) {
+    std::vector<std::pair<size_t, size_t>> r = {{i, j}};
+    size_t k = other_leg(i, j), l = other_leg(j, i);
+    if (k != nst) r.push_back({k, i});
+    if (l != nst) r.push_back({j, l});
+    return r;
+  };
+  auto plan_dir = [&](size_t a, size_t b, lxVec & h) {
+    thdb1ds & sa = d1.station_vec[a], & sb = d1.station_vec[b];
+    double hl = std::hypot(sb.x - sa.x, sb.y - sa.y);
+    if (hl < ELEVATION_LEVEL) return false;
+    h = lxVec((sb.x - sa.x) / hl, (sb.y - sa.y) / hl, 0.0);
+    return true;
+  };
+  auto station_tilt = [&](size_t p, size_t s, size_t n, const lxVec & h) {  // legs p -> s -> n; p or n may be nst
+    if (sec[s].ok) {
+      lxVec v = sec[s].v;
+      if (v.z < 0.0) v = -1.0 * v;
+      return deg(atan2(v * h, v.z));
+    }
+    if (p == nst) return steep_leg(s, n) ? 90.0 : 0.0;
+    if (n == nst) return steep_leg(p, s) ? 90.0 : 0.0;
+    bool sp = steep_leg(p, s), sn = steep_leg(s, n);
+    if (sp == sn) return sp ? 90.0 : 0.0;
+    thdb1ds & a = d1.station_vec[p], & b = d1.station_vec[s], & c = d1.station_vec[n];
+    double ia = std::hypot(b.x - a.x, b.y - a.y), iz = b.z - a.z, oa = std::hypot(c.x - b.x, c.y - b.y), oz = c.z - b.z,
+      il = std::hypot(ia, iz), ol = std::hypot(oa, oz);
+    if ((il < 1e-6) || (ol < 1e-6)) return 0.0;
+    return deg(atan2(-(iz / il + oz / ol), ia / il + oa / ol));  // square to the bisector
+  };
+  auto leg_tilt = [&](size_t i, size_t j, double f) {
+    lxVec h(0.0, 0.0, 0.0);
+    for (auto & ab : forward_legs(i, j))
+      if (plan_dir(ab.first, ab.second, h)) break;
+    double ti = station_tilt(other_leg(i, j), i, j, h), tj = station_tilt(i, j, other_leg(j, i), h);
+    if (tj - ti > 90.0) tj -= 180.0;
+    if (ti - tj > 90.0) tj += 180.0;
+    return ti + f * (tj - ti);
+  };
+  // The leg i -> j as drawn at f (elev.drawn_leg), the direction to read the
+  // drawing across it ((dx, dy) in the scrap; vertical: floor and roof only),
+  // and that direction in the cave (D), tilted towards the forward direction in
+  // plan (forward_legs), which must run along the drawing
+  auto drawn_across = [&](size_t i, size_t j, double f, bool vertical, size_t & rsi, double & rx, double & ry,
+                          double & dx, double & dy, lxVec & D) {
+    thdb1ds & si = d1.station_vec[i], & sj = d1.station_vec[j];
+    if (!elev.drawn_leg(i, j, f, std::hypot(sj.x - si.x, sj.y - si.y), sj.z - si.z, rsi, rx, ry)) return false;
+    double t = vertical ? 0.0 : rad(leg_tilt(i, j, f));
+    dx = 0.0;
+    dy = 1.0;
+    D = lxVec(0.0, 0.0, 1.0);
+    if (std::fabs(sin(t)) < 1e-6) return true;
+    lxVec h;
+    double sgn = 0.0;
+    for (auto & ab : forward_legs(i, j)) {
+      thdb1ds & sa = d1.station_vec[ab.first], & sb = d1.station_vec[ab.second];
+      double al = 0.0, x0, y0;
+      size_t s0;
+      if (plan_dir(ab.first, ab.second, h)
+          && elev.drawn_leg(ab.first, ab.second, 0.0, std::hypot(sb.x - sa.x, sb.y - sa.y), sb.z - sa.z, s0, x0, y0, NULL, &al)
+          && (std::fabs(al) >= ELEVATION_LEVEL)) {
+        sgn = (al > 0.0) ? 1.0 : -1.0;
+        break;
+      }
+    }
+    if (sgn == 0.0) return false;
+    dx = sgn * sin(t);
+    dy = cos(t);
+    D = sin(t) * h + lxVec(0.0, 0.0, cos(t));
+    return true;
+  };
+  // all drawn spans at f along the leg, as distances along D from the leg
+  // (up, down); vertical: floor and roof only, steep legs skipped
+  auto leg_spans = [&](size_t i, size_t j, double f, std::vector<std::pair<double, double>> & ud, lxVec & D,
+                       bool vertical) {
     double x, z;
+    bool steep;
     std::vector<size_t> both, either;
     ud.clear();
-    if (!leg_ext(i, j, f, x, z, both, either)) return false;
+    D = lxVec(0.0, 0.0, 1.0);
+    if (!leg_ext(i, j, f, x, z, both, either, steep) || (vertical && steep)) return false;
     size_t rsi;
-    double rx, ry;
-    thdb1ds & si = d1.station_vec[i], & sj = d1.station_vec[j];
-    if (elev.drawn_leg(i, j, f, std::hypot(sj.x - si.x, sj.y - si.y), sj.z - si.z, rsi, rx, ry)) {  // as drawn
-      for (auto & p : elev.raw_spans(rsi, rx)) ud.push_back(std::make_pair(p.second - ry, ry - p.first));
+    double rx, ry, dx, dy;
+    if (drawn_across(i, j, f, vertical, rsi, rx, ry, dx, dy, D)) {  // as drawn
+      for (auto & p : elev.raw_spans(rsi, rx, ry, dx, dy)) ud.push_back(std::make_pair(p.second, -p.first));
       return !ud.empty();
     }
+    if (steep) return false;
     std::vector<std::pair<double, double>> sp = elev.spans(both, x);
     if (sp.empty()) sp = elev.spans(either, x);
     for (auto & p : sp) ud.push_back(std::make_pair(p.second - z, z - p.first));
@@ -1617,15 +1723,17 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
   // overlap); where the height would change by more than BRANCH_OPENING times
   // from one position to the next, the previous up and down are kept.
   auto track_elevation = [&](size_t i, size_t j, const std::vector<double> & fs, const std::vector<size_t> & order,
-                             std::vector<double> & up, std::vector<double> & down, std::vector<char> & ok) {
+                             std::vector<double> & up, std::vector<double> & down, std::vector<char> & ok,
+                             std::vector<lxVec> & dirs, bool vertical) {
     up.assign(fs.size(), 0.0);
     down.assign(fs.size(), 0.0);
     ok.assign(fs.size(), 0);
+    dirs.assign(fs.size(), lxVec(0.0, 0.0, 1.0));
     bool have = false;
     double pu = 0.0, pd = 0.0;
     for (size_t k : order) {
       std::vector<std::pair<double, double>> ud;
-      if (!leg_spans(i, j, fs[k], ud)) continue;
+      if (!leg_spans(i, j, fs[k], ud, dirs[k], vertical)) continue;
       double bu = 0.0, bd = 0.0, best = -1e99;
       for (auto & c : ud) {
         double score;
@@ -1645,65 +1753,60 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     }
   };
   std::set<std::pair<size_t, size_t>> elevlegs_drawn, elevlegs_placed;
-  auto leg_elevation = [&](size_t i, size_t j, double f, double & floor, double & roof) {
-    if (elev.rings.empty()) return false;
-    for (thdb1d_tree_arrow * ar = nodes[i].first_arrow; ar != NULL; ar = ar->next_arrow) {
-      thdataleg * l = ar->leg->leg;
-      if (((l->flags & (TT_LEGFLAG_SPLAY | TT_LEGFLAG_SURFACE)) != 0) || (ar->end_node->uid - 1 != j)) continue;
-      if ((l->extend & TT_EXTENDFLAG_HIDE) != 0) return false;
-      thdb1ds & si = d1.station_vec[i], & sj = d1.station_vec[j];
-      double hl = std::hypot(sj.x - si.x, sj.y - si.y), dz = sj.z - si.z;
-      if (deg(atan2(std::fabs(dz), hl)) > ELEVATION_STEEP) return false;
-      double xi = ar->is_reversed ? l->txx : l->fxx, xj = ar->is_reversed ? l->fxx : l->txx;
-      std::vector<size_t> both, either;
-      auto ii = elev.station_scraps.find(i), jj = elev.station_scraps.find(j);
-      if (ii != elev.station_scraps.end())
-        for (size_t s1 : ii->second) {
-          either.push_back(s1);
-          if ((jj != elev.station_scraps.end()) && (std::find(jj->second.begin(), jj->second.end(), s1) != jj->second.end()))
-            both.push_back(s1);
+  // the drawn span at f along the leg containing the leg (or the nearest
+  // within ELEVATION_NEAR), as distances along D from the leg (lo, hi);
+  // vertical: floor and roof only, steep legs skipped
+  auto leg_elevation = [&](size_t i, size_t j, double f, double & lo, double & hi, lxVec & D, bool vertical = false) {
+    double x, z;
+    bool steep;
+    std::vector<size_t> both, either;
+    D = lxVec(0.0, 0.0, 1.0);
+    if (!leg_ext(i, j, f, x, z, both, either, steep) || (vertical && steep)) return false;
+    // as drawn: the leg's place in a scrap with both stations drawn in it
+    size_t rsi;
+    double rx, ry, dx, dy;
+    if (drawn_across(i, j, f, vertical, rsi, rx, ry, dx, dy, D)) {
+      double best = -1.0;
+      for (auto & p : elev.raw_spans(rsi, rx, ry, dx, dy)) {
+        double d = (p.first > 0.0) ? p.first : ((p.second < 0.0) ? -p.second : 0.0);
+        if ((d <= ELEVATION_NEAR) && ((best < 0.0) || (d < best))) {
+          best = d;
+          lo = p.first;
+          hi = p.second;
         }
-      if (jj != elev.station_scraps.end())
-        for (size_t s2 : jj->second)
-          if (std::find(either.begin(), either.end(), s2) == either.end()) either.push_back(s2);
-      double x = xi + f * (xj - xi), z = si.z + f * dz;
-      // as drawn: the leg's place in a scrap with both stations drawn in it
-      size_t rsi;
-      double rx, ry;
-      if (elev.drawn_leg(i, j, f, hl, dz, rsi, rx, ry)) {
-        double best = -1.0;
-        for (auto & p : elev.raw_spans(rsi, rx)) {
-          double d = (ry < p.first) ? p.first - ry : ((ry > p.second) ? ry - p.second : 0.0);
-          if ((d <= ELEVATION_NEAR) && ((best < 0.0) || (d < best))) {
-            best = d;
-            floor = z + (p.first - ry);
-            roof = z + (p.second - ry);
-          }
-        }
-        elevlegs_drawn.insert(std::make_pair(std::min(i, j), std::max(i, j)));
-        return best >= 0.0;
       }
-      elevlegs_placed.insert(std::make_pair(std::min(i, j), std::max(i, j)));
-      if (!both.empty() && elev.span(both, x, z, floor, roof)) return true;
-      return elev.span(either, x, z, floor, roof);
+      elevlegs_drawn.insert(std::make_pair(std::min(i, j), std::max(i, j)));
+      return best >= 0.0;
     }
-    return false;
+    if (steep) return false;
+    elevlegs_placed.insert(std::make_pair(std::min(i, j), std::max(i, j)));
+    double floor, roof;
+    if ((both.empty() || !elev.span(both, x, z, floor, roof)) && !elev.span(either, x, z, floor, roof)) return false;
+    lo = floor - z;
+    hi = roof - z;
+    return true;
   };
-  auto station_elevation = [&](size_t i, double & floor, double & roof) {
+  auto station_elevation = [&](size_t i, double & lo, double & hi, lxVec & D) {
     for (size_t k : nbrs[i])
-      if (leg_elevation(i, k, 0.0, floor, roof)) return true;
+      if (leg_elevation(i, k, 0.0, lo, hi, D)) return true;
     return false;
   };
-  // scales a ring vertically so that its top meets the drawn roof and its bottom the drawn floor
-  auto vstretch = [&](std::vector<lxVec> & P, double floor, double roof, const std::string & where) {
+  auto station_at = [&](size_t i) { return lxVec(d1.station_vec[i].x, d1.station_vec[i].y, d1.station_vec[i].z); };
+  // scales a ring along D about c so that its extremes meet the drawn span
+  // (lo, hi from c along D): roof and floor when D is vertical
+  auto vstretch = [&](std::vector<lxVec> & P, const lxVec & c, const lxVec & D, double lo, double hi,
+                      const std::string & where) {
     double top = -1e99, bot = 1e99;
-    for (const lxVec & p : P) { top = std::max(top, p.z); bot = std::min(bot, p.z); }
-    if ((top - bot < 0.1) || (roof - floor < 0.1)) return;
-    double fac = (roof - floor) / (top - bot);
-    for (lxVec & p : P) p.z = floor + (p.z - bot) * fac;
+    for (const lxVec & p : P) { top = std::max(top, (p - c) * D); bot = std::min(bot, (p - c) * D); }
+    if ((top - bot < 0.1) || (hi - lo < 0.1)) return;
+    double fac = (hi - lo) / (top - bot);
+    for (lxVec & p : P) {
+      double t = (p - c) * D;
+      p = p + (lo + (t - bot) * fac - t) * D;
+    }
     nvscaled++;
     if ((fac > STRETCH_REPORT) || (fac < 1.0 / STRETCH_REPORT))
-      vreport += fmt::format("{:>30}  height x{:.2f} ({:.2f} -> {:.2f} m)\n", where, fac, top - bot, roof - floor);
+      vreport += fmt::format("{:>30}  height x{:.2f} ({:.2f} -> {:.2f} m)\n", where, fac, top - bot, hi - lo);
   };
   // Fractions along a leg (up to fmax) for the sections: wherever the drawn
   // width or height has changed by more than spacing_change percent since the
@@ -1746,7 +1849,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
     std::string where = fmt::format("{}@{}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name);
     stretch(P, sec[i].c, horizontal(sec[i].u), where);
     double ef, er;
-    if (station_elevation(i, ef, er)) vstretch(P, ef, er, where);
+    lxVec ed;
+    if (station_elevation(i, ef, er, ed)) vstretch(P, station_at(i), ed, ef, er, where);
     return P;
   };
   // branches ending at junctions: end position, across direction, end ring
@@ -1787,15 +1891,17 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
           std::vector<double> fs = positions(len, 1.0, [&](double f) {
             lxVec c = a.c + f * (cj - a.c);
             double r1, l1, ef, er;
+            lxVec ed;
             return lxVec(drawn.width(c.x, c.y, c.z, h, r1, l1) ? r1 + l1 : -1.0,
-              leg_elevation(i, j, f, ef, er) ? er - ef : -1.0, 0.0);
+              leg_elevation(i, j, f, ef, er, ed) ? er - ef : -1.0, 0.0);
           });
           nlegspaced++;
           std::vector<size_t> dord;
           for (size_t m = 0; m < fs.size(); m++) dord.push_back(m);
           std::vector<double> dup, ddown;
           std::vector<char> dok;
-          track_elevation(i, j, fs, dord, dup, ddown, dok);
+          std::vector<lxVec> ddir;
+          track_elevation(i, j, fs, dord, dup, ddown, dok, ddir, false);
           std::vector<lxVec> Plast = station_ring(i);
           std::vector<thdb3dvx *> prev = ring(Plast);
           for (size_t m = 1; m < fs.size(); m++) {
@@ -1805,10 +1911,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
             for (size_t k = 0; k < a.q.size(); k++) P.push_back(a.point(k) + (c - a.c));
             std::string where = fmt::format("{}@{} -> {}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name, e.name);
             stretch(P, c, h, where);
-            if (dok[m]) {
-              double z = d1.station_vec[i].z + f * (e.z - d1.station_vec[i].z);
-              vstretch(P, z - ddown[m], z + dup[m], where);
-            }
+            if (dok[m]) vstretch(P, station_at(i) + f * (lxVec(e.x, e.y, e.z) - station_at(i)), ddir[m], -ddown[m], dup[m], where);
             std::vector<thdb3dvx *> cur = ring(P);
             loft(prev, cur);
             prev = cur;
@@ -1877,8 +1980,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
           std::vector<double> fs = positions(len, fmax, [&](double f) {
             lxVec c = a.c + f * (cj - a.c);
             double r1, l1, ef, er;
+            lxVec ed;
             return lxVec(drawn.width(c.x, c.y, c.z, h, r1, l1) ? r1 + l1 : -1.0,
-              leg_elevation(i, j, f, ef, er) ? er - ef : -1.0, 0.0);
+              leg_elevation(i, j, f, ef, er, ed) ? er - ef : -1.0, 0.0);
           });
           nlegspaced++;
           // up and down followed from the station towards the junction
@@ -1886,7 +1990,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
           for (size_t m = 0; m < fs.size(); m++) bord.push_back(m);
           std::vector<double> bup, bdown;
           std::vector<char> bok;
-          track_elevation(i, j, fs, bord, bup, bdown, bok);
+          std::vector<lxVec> bdir;
+          track_elevation(i, j, fs, bord, bup, bdown, bok, bdir, false);
           for (size_t m = 1; (m < fs.size()) && (fmax > 0.0); m++) {
             double f = fs[m];
             lxVec c = a.c + f * (cj - a.c);
@@ -1895,10 +2000,7 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
             for (size_t k = 0; k < a.q.size(); k++) P.push_back(a.point(k) + (c - a.c));
             std::string where = fmt::format("{}@{} -> {}", d1.station_vec[i].name, d1.station_vec[i].survey->full_name, e.name);
             stretch(P, c, h, where);
-            if (bok[m]) {
-              double z = d1.station_vec[i].z + f * (e.z - d1.station_vec[i].z);
-              vstretch(P, z - bdown[m], z + bup[m], where);
-            }
+            if (bok[m]) vstretch(P, station_at(i) + f * (lxVec(e.x, e.y, e.z) - station_at(i)), bdir[m], -bdown[m], bup[m], where);
             std::vector<thdb3dvx *> cur = ring(P);
             loft(prev, cur);
             prev = cur;
@@ -2056,8 +2158,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         std::vector<double> fs = positions(len, 1.0, [&](double f) {
           lxVec c = (1.0 - f) * a.c + f * b.c, h = horizontal((1.0 - f) * ha + f * hb);
           double r1, l1, ef, er;
+          lxVec ed;
           return lxVec(drawn.width(c.x, c.y, c.z, h, r1, l1) ? r1 + l1 : -1.0,
-            leg_elevation(i, j, f, ef, er) ? er - ef : -1.0, 0.0);
+            leg_elevation(i, j, f, ef, er, ed) ? er - ef : -1.0, 0.0);
         });
         nlegspaced++;
         size_t nseg = fs.size() - 1;
@@ -2075,9 +2178,11 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
           if (!(((m == 0) && drawnsec[i]) || ((m == nseg) && drawnsec[j]))) {
             stretch(P, c, h, where);
             double ef, er;
-            bool ok = (m == 0) ? station_elevation(i, ef, er) : ((m == nseg) ? station_elevation(j, ef, er)
-              : leg_elevation(i, j, f, ef, er));
-            if (ok) vstretch(P, ef, er, where);
+            lxVec ed;
+            bool ok = (m == 0) ? station_elevation(i, ef, er, ed) : ((m == nseg) ? station_elevation(j, ef, er, ed)
+              : leg_elevation(i, j, f, ef, er, ed));
+            if (ok) vstretch(P, (m == 0) ? station_at(i) : ((m == nseg) ? station_at(j)
+              : station_at(i) + f * (station_at(j) - station_at(i))), ed, ef, er, where);
           }
           std::vector<thdb3dvx *> cur = ring(P);
           if (m > 0) loft(prev, cur);
@@ -2143,9 +2248,9 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
       if (f1 - f0 < 1e-3) continue;
       std::vector<double> fs = positions(len * (f1 - f0), 1.0, [&](double g) {
         double f = f0 + g * (f1 - f0), r1, l1, ef, er;
-        lxVec c = ci + f * (cj - ci);
+        lxVec c = ci + f * (cj - ci), ed;
         return lxVec(drawn.width(c.x, c.y, c.z, h, r1, l1) ? r1 + l1 : -1.0,
-          leg_elevation(i, j, f, ef, er) ? er - ef : -1.0, 0.0);
+          leg_elevation(i, j, f, ef, er, ed, true) ? er - ef : -1.0, 0.0);
       });
       for (double & g : fs) g = f0 + g * (f1 - f0);
       // up and down followed along the leg from the end that is not a junction
@@ -2167,7 +2272,8 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         if (od->empty()) continue;
         std::vector<double> tu, td;
         std::vector<char> tok;
-        track_elevation(i, j, fs, *od, tu, td, tok);
+        std::vector<lxVec> tdir;
+        track_elevation(i, j, fs, *od, tu, td, tok, tdir, true);
         for (size_t k : *od) { ovup[k] = tu[k]; ovdown[k] = td[k]; ovok[k] = tok[k]; }
       }
       // oval ring at position k, or empty where nothing is drawn
@@ -2531,9 +2637,11 @@ void thsplaytube_build(thdatabase * db, thdb3ddata & walls, thdb3ddata & section
         if (d < best) { best = d; bf = f; bk = k; }
       }
       double fl, rf;
-      if ((bk == nst) || !leg_elevation(j, bk, bf, fl, rf) || (rf < fl + 0.1)) return false;
-      top = rf;
-      bot = fl;
+      lxVec ed;
+      if ((bk == nst) || !leg_elevation(j, bk, bf, fl, rf, ed, true) || (rf < fl + 0.1)) return false;
+      double zb = js.z + bf * (d1.station_vec[bk].z - js.z);
+      top = zb + rf;
+      bot = zb + fl;
       return true;
     };
     size_t nelevheights = 0, nheightpts = 0;
