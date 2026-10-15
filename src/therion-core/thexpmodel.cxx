@@ -63,6 +63,7 @@ thexpmodel::thexpmodel() {
   this->items = TT_EXPMODEL_ITEM_ALL;
   this->wallsrc = TT_WSRC_MAPS;
   this->viewersrc = TT_VSRC_WEB;
+  this->modeldebug = false;
   this->encoding = TT_UTF_8;
 }
 
@@ -134,6 +135,17 @@ void thexpmodel::parse_options(int & argx, int nargs, char ** args)
       argx++;
       break;
 
+    case TT_EXPMODEL_OPT_MODELDEBUG:
+      argx++;
+      if (argx >= nargs)
+        throw thexception(fmt::format("missing model debug switch -- \"{}\"",args[optx]));
+      utmp = thmatch_token(args[argx], thtt_bool);
+      if ((utmp != TT_TRUE) && (utmp != TT_FALSE))
+        throw thexception(fmt::format("invalid model debug switch -- \"{}\"", args[argx]));
+      this->modeldebug = (utmp == TT_TRUE);
+      argx++;
+      break;
+
     case TT_EXPMODEL_OPT_SECTIONSPACING: {
       // -section-spacing <change %> <min m> <max m>
       double v[3];
@@ -178,8 +190,9 @@ unsigned thexpmodel_parse_wallsrc(const char * value)
 
 // Wall layers for the chosen wall sources, in the order they are exported.
 // maps: the model from maps and sections; with nothing drawn, the splay tubes,
-// and with no cross section splays either, the LRUD walls.
-std::vector<thexpmodel_layer> thexpmodel::get_wall_layers(class thdatabase * dbp)
+// and with no cross section splays either, the LRUD walls. debug: also the
+// working layers the model is built from (mostly lines).
+std::vector<thexpmodel_layer> thexpmodel::get_wall_layers(class thdatabase * dbp, bool debug)
 {
   std::vector<thexpmodel_layer> res;
   if ((this->items & TT_EXPMODEL_ITEM_WALLS) == 0) return res;
@@ -192,20 +205,21 @@ std::vector<thexpmodel_layer> thexpmodel::get_wall_layers(class thdatabase * dbp
   auto lrud = [&]() {
     add(dbp->db1d.get_3d_walls(), "LRUD walls", "walls-centreline", 4, 0.9f, 0.9f, 0.9f, 1.0f, TT_WSRC_CENTERLINE, NULL);
   };
-  auto splay_tubes = [&]() {
-    bool t = add(dbp->db1d.get_3d_splay_tubes(), "splay tubes", "walls-splay-tubes", 4, 0.75f, 0.8f, 0.95f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
-    bool j = add(dbp->db1d.get_3d_splay_junctions(), "junction bodies", "walls-splay-tubes", 4, 0.95f, 0.8f, 0.6f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
+  auto splay_tubes = [&](const std::string & group) {
+    bool t = add(dbp->db1d.get_3d_splay_tubes(), "splay tubes", group, 4, 0.75f, 0.8f, 0.95f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
+    bool j = add(dbp->db1d.get_3d_splay_junctions(), "junction bodies", group, 4, 0.95f, 0.8f, 0.6f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
     return t || j;
   };
+  bool m = false;  // the model from maps and sections was added
   if ((this->wallsrc & TT_WSRC_CENTERLINE) != 0) lrud();
   if ((this->wallsrc & TT_WSRC_MAPS) != 0) {
-    bool m = add(dbp->db1d.get_3d_map_tubes(), "walls from maps and sections", "walls-maps", 4, 0.8f, 0.85f, 0.95f, 1.0f, TT_WSRC_MAPS, NULL);
+    m = add(dbp->db1d.get_3d_map_tubes(), "walls from maps and sections", "walls-maps", 4, 0.8f, 0.85f, 0.95f, 1.0f, TT_WSRC_MAPS, NULL);
     m = add(dbp->db1d.get_3d_map_junctions(), "junctions from maps", "walls-maps", 4, 0.95f, 0.75f, 0.55f, 1.0f, TT_WSRC_MAPS, NULL) || m;
     m = add(dbp->db1d.get_3d_map_fills(), "passages from the drawn plan", "walls-maps", 4, 0.6f, 0.85f, 0.7f, 1.0f, TT_WSRC_MAPS, NULL) || m;
-    if (!m && ((this->wallsrc & TT_WSRC_SPLAYTUBES) == 0) && !splay_tubes() && ((this->wallsrc & TT_WSRC_CENTERLINE) == 0))
+    if (!m && ((this->wallsrc & TT_WSRC_SPLAYTUBES) == 0) && !splay_tubes("walls-splay-tubes") && ((this->wallsrc & TT_WSRC_CENTERLINE) == 0))
       lrud();
   }
-  if ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0) splay_tubes();
+  if ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0) splay_tubes("walls-splay-tubes");
   if ((this->wallsrc & TT_WSRC_SCANS) != 0) {
     for (auto & o : dbp->object_list) {
       if (o->get_class_id() != TT_SCAN_CMD) continue;
@@ -222,6 +236,15 @@ std::vector<thexpmodel_layer> thexpmodel::get_wall_layers(class thdatabase * dbp
       add(pst->get_3d_outline(), fmt::format("{}@{}", pst->name, pst->survey->full_name),
           "walls-splays", 4, 0.6f, 0.8f, 0.6f, 0.5f, TT_WSRC_SPLAYS, pst->survey);
     }
+  }
+  if (debug && ((this->wallsrc & (TT_WSRC_MAPS | TT_WSRC_SPLAYTUBES)) != 0)) {
+    // the splay tubes under the model from maps, the section splays and
+    // polygons, the virtual splays to drawn walls and the drawn cross sections
+    if (m && ((this->wallsrc & TT_WSRC_SPLAYTUBES) == 0)) splay_tubes("debug-splay-tubes");
+    add(dbp->db1d.get_3d_section_splays(), "section splays", "section-splays", 1, 1.0f, 0.8f, 0.2f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
+    add(dbp->db1d.get_3d_section_polygons(), "section polygons", "section-polygons", 1, 1.0f, 0.35f, 0.25f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
+    add(dbp->db1d.get_3d_virtual_splays(), "virtual splays", "virtual-splays", 1, 0.2f, 1.0f, 0.4f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
+    add(dbp->db1d.get_3d_drawn_sections(), "drawn cross sections", "drawn-sections", 1, 0.1f, 0.85f, 1.0f, 1.0f, TT_WSRC_MAPS, NULL);
   }
   return res;
 }
@@ -2135,7 +2158,7 @@ std::string thexpmodel::get_gltf_data(class thdatabase * dbp) {
   if ((this->items & TT_EXPMODEL_ITEM_SPLAYSHOTS) != 0)
     add(splay_pgn, "splays", "splays", 1, 0.6f, 0.6f, 0.6f, 1.0f);
 
-  for (const thexpmodel_layer & l : this->get_wall_layers(dbp))
+  for (const thexpmodel_layer & l : this->get_wall_layers(dbp, this->modeldebug))
     add(l.d3d, l.name, l.group, l.mode, l.rgba[0], l.rgba[1], l.rgba[2], l.rgba[3]);
 
   // binary buffer

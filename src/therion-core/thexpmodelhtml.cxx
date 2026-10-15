@@ -183,9 +183,11 @@ scene.add(root);
 
 var groupNames = {'centreline': 'Centreline', 'splays': 'Splay shots', 'walls-maps': 'Walls from maps',
   'walls-splays': 'Walls from splays', 'walls-centreline': 'Walls from LRUD', 'walls-scans': 'Walls from scans',
-  'walls-splay-tubes': 'Tubes from section splays'};
+  'walls-splay-tubes': 'Tubes from section splays', 'debug-splay-tubes': 'Tubes from section splays',
+  'section-splays': 'Section splays', 'section-polygons': 'Section polygons',
+  'virtual-splays': 'Virtual splays to drawn walls', 'drawn-sections': 'Drawn cross sections'};
 // groups hidden when the page opens
-var hiddenGroups = ['section-polygons'];
+var hiddenGroups = ['section-polygons', 'debug-splay-tubes'];
 var groups = {}, order = [];
 (gltf.nodes || []).forEach(function (node) {
   var mesh = gltf.meshes[node.mesh], p = mesh.primitives[0];

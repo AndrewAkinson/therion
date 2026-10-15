@@ -780,6 +780,10 @@ piecewise linear 3d model from passage walls made of B\'ezier curves.
 
     Walls are exported in the |loch|, |vrml|, |3dmf|, |dxf|, |gltf| and |html|
     formats.
+  * \NEW{6.4.1}|model-debug <on/off>| = for the |gltf| and |html| formats, add
+    the layers the |maps| and |splay-tubes| walls are built from: the section
+    splays, section polygons, virtual splays to drawn walls and drawn cross
+    sections, and with |maps| the splay tubes underneath. Default is |off|.
   * \NEW{6.4.1}|section-spacing <change> <min> <max>| = for |maps| walls, place a
     section along a leg wherever the drawn width or height has changed by more
     than <change> per cent since the last one, at least <min> and at most <max>

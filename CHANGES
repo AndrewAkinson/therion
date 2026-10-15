@@ -16,6 +16,8 @@ therion:
  * loch, vrml, 3dmf, dxf, gltf and html model exports contain the same walls,
    in the colours of the html viewer
  * new `-section-spacing' model export option
+ * new `-model-debug' model export option: the layers the model is built
+   from, in gltf and html exports
 
 Windows installer:
  * use TeXLive 2026 binaries instead of dated W32TeX distribution

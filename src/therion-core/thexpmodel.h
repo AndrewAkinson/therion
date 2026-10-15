@@ -49,6 +49,7 @@ enum {
   TT_EXPMODEL_OPT_ENCODING,  ///< Output encoding.
   TT_EXPMODEL_OPT_VIEWERSRC,  ///< HTML viewer source.
   TT_EXPMODEL_OPT_SECTIONSPACING,  ///< Spacing of sections in the model from drawings.
+  TT_EXPMODEL_OPT_MODELDEBUG,  ///< Working layers of the model in glTF and HTML.
 };
 
 
@@ -63,6 +64,7 @@ static const thstok thtt_expmodel_opt[] = {
   {"-encoding", TT_EXPMODEL_OPT_ENCODING},
   {"-fmt", TT_EXPMODEL_OPT_FORMAT},
   {"-format", TT_EXPMODEL_OPT_FORMAT},
+  {"-model-debug", TT_EXPMODEL_OPT_MODELDEBUG},
   {"-section-spacing", TT_EXPMODEL_OPT_SECTIONSPACING},
   {"-viewer-source", TT_EXPMODEL_OPT_VIEWERSRC},
   {"-wall-source", TT_EXPMODEL_OPT_WALLSRC},
@@ -242,6 +244,8 @@ class thexpmodel : public thexport {
     wallsrc,
     viewersrc;
 
+  bool modeldebug;  ///< Add the model's working layers (glTF and HTML).
+
   bool is_leg_exported(class thdb1dl * l); ///< Whether to export leg.
 
   void export_3d_file(class thdatabase * dbp);  ///< Export survex 3d file.
@@ -270,7 +274,7 @@ class thexpmodel : public thexport {
 
   void export_kml_survey_file(FILE * out, thsurvey * surv);  ///< Helper function to export part of the survey tree
 
-  std::vector<thexpmodel_layer> get_wall_layers(class thdatabase * dbp);  ///< Wall layers for the chosen wall sources.
+  std::vector<thexpmodel_layer> get_wall_layers(class thdatabase * dbp, bool debug = false);  ///< Wall layers for the chosen wall sources (debug: and the working layers).
 
   public:
   
