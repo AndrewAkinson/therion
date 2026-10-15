@@ -92,4 +92,27 @@ HTML working layers were uncommitted test code until now.
 
 ## Progress
 
-(Filled in as the stages are done.)
+Done 2026-10-15.
+
+1. **Wall sources**, b8f4ccd2. As planned. Station splay walls now skip the
+   stations of splay ends and empty meshes, which the glTF writer had let through
+   (the Loch writer already left them out). One change from the plan, the model
+   from maps puts its walls, junctions and plan passages in one viewer group
+   (`walls-maps`), so one switch shows or hides the whole model.
+2. **Every format from the list**, 604e0c4e. VRML and 3DMF now use the layer
+   colours and draw both sides of every wall, VRML with transparency for the
+   splay walls. Decision 11 dropped, the therion (`.thm`) writer is commented out
+   in the source, so there was nothing to change.
+3. **Debug layers**, e3d1ce24. Under `maps` the splay tubes and junction bodies
+   are a group of their own (`debug-splay-tubes`), switched off when the page
+   opens, so they do not hide the model.
+4. **Wrap up.** `utest` passes. Trident, FairyChimneys, Swildons and LVS export
+   to glTF and HTML with `-model-debug on`, and LVS to Loch, VRML, 3DMF and DXF,
+   all without errors. Loch files were checked for being written, not opened in
+   Loch.
+
+Left for later
+
+- Open the Loch, VRML, 3DMF and DXF files in their viewers.
+- Check the glTF with the Khronos validator.
+- Survex, Compass, KML and Esri remain without walls.
