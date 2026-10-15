@@ -13,6 +13,8 @@ therion:
    of extruding plan scrap outlines; it is the new default wall source
    (was `all')
  * several model wall sources may be given separated by commas
+ * loch, vrml, 3dmf, dxf, gltf and html model exports contain the same walls,
+   in the colours of the html viewer
  * new `-section-spacing' model export option
 
 Windows installer:
