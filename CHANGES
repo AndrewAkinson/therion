@@ -8,6 +8,12 @@ therion:
    (three.js); new `-viewer-source web/embedded' model export option
  * new `splay-tubes' model wall source: passage tubes from cross-section
    splay shots
+ * `maps' model wall source now builds passages from the plan and extended
+   elevation drawings, drawn cross sections and cross-section splays, instead
+   of extruding plan scrap outlines; it is the new default wall source
+   (was `all')
+ * several model wall sources may be given separated by commas
+ * new `-section-spacing' model export option
 
 Windows installer:
  * use TeXLive 2026 binaries instead of dated W32TeX distribution

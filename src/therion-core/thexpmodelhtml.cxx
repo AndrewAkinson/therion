@@ -182,10 +182,8 @@ var root = new THREE.Group();
 scene.add(root);
 
 var groupNames = {'centreline': 'Centreline', 'splays': 'Splay shots', 'walls-maps': 'Walls from maps',
-  'walls-splays': 'Walls from splays', 'walls-centreline': 'Walls from LRUD',
-  'walls-splay-tubes': 'Tubes from section splays', 'section-splays': 'Section splays',
-  'section-polygons': 'Section polygons', 'walls-junctions': 'Junctions from splays',
-  'virtual-splays': 'Virtual splays to drawn walls'};
+  'walls-splays': 'Walls from splays', 'walls-centreline': 'Walls from LRUD', 'walls-scans': 'Walls from scans',
+  'walls-splay-tubes': 'Tubes from section splays'};
 // groups hidden when the page opens
 var hiddenGroups = ['section-polygons'];
 var groups = {}, order = [];

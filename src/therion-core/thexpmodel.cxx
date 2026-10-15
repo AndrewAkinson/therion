@@ -47,6 +47,7 @@
 #include "thlang.h"
 #include "thfilehandle.h"
 #include "thparse.h"
+#include "thmbuffer.h"
 #include "therion.h"
 #include <filesystem>
 #include <cstdint>
@@ -60,7 +61,7 @@
 thexpmodel::thexpmodel() {
   this->format = TT_EXPMODEL_FMT_UNKNOWN;
   this->items = TT_EXPMODEL_ITEM_ALL;
-  this->wallsrc = TT_WSRC_ALL;
+  this->wallsrc = TT_WSRC_MAPS;
   this->viewersrc = TT_VSRC_WEB;
   this->encoding = TT_UTF_8;
 }
@@ -115,7 +116,7 @@ void thexpmodel::parse_options(int & argx, int nargs, char ** args)
       argx++;
       if (argx >= nargs)
         throw thexception(fmt::format("missing wall source -- \"{}\"",args[optx]));
-      utmp = thmatch_token(args[argx], thtt_expmodel_wallsrc);
+      utmp = thexpmodel_parse_wallsrc(args[argx]);
       if (utmp == TT_WSRC_UNKNOWN)
         throw thexception(fmt::format("unknown wall source -- \"{}\"", args[argx]));
       this->wallsrc = utmp;
@@ -159,6 +160,72 @@ void thexpmodel::parse_options(int & argx, int nargs, char ** args)
       break;
   }
 }
+
+unsigned thexpmodel_parse_wallsrc(const char * value)
+{
+  thmbuffer parts;
+  thsplit_strings(&parts, value, ',');
+  char ** v = parts.get_buffer();
+  unsigned res = TT_WSRC_UNKNOWN;
+  for (long i = 0; i < parts.get_size(); i++) {
+    unsigned w = thmatch_token(v[i], thtt_expmodel_wallsrc);
+    if (w == TT_WSRC_UNKNOWN) return TT_WSRC_UNKNOWN;
+    res |= w;
+  }
+  return res;
+}
+
+
+// Wall layers for the chosen wall sources, in the order they are exported.
+// maps: the model from maps and sections; with nothing drawn, the splay tubes,
+// and with no cross section splays either, the LRUD walls.
+std::vector<thexpmodel_layer> thexpmodel::get_wall_layers(class thdatabase * dbp)
+{
+  std::vector<thexpmodel_layer> res;
+  if ((this->items & TT_EXPMODEL_ITEM_WALLS) == 0) return res;
+  auto add = [&](thdb3ddata * d3d, const std::string & name, const std::string & group, int mode,
+                 float r, float g, float b, float a, unsigned source, thsurvey * survey) {
+    if ((d3d == NULL) || (d3d->firstvx == NULL) || (d3d->firstfc == NULL) || (d3d->nfaces == 0)) return false;
+    res.push_back({d3d, name, group, mode, {r, g, b, a}, source, survey});
+    return true;
+  };
+  auto lrud = [&]() {
+    add(dbp->db1d.get_3d_walls(), "LRUD walls", "walls-centreline", 4, 0.9f, 0.9f, 0.9f, 1.0f, TT_WSRC_CENTERLINE, NULL);
+  };
+  auto splay_tubes = [&]() {
+    bool t = add(dbp->db1d.get_3d_splay_tubes(), "splay tubes", "walls-splay-tubes", 4, 0.75f, 0.8f, 0.95f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
+    bool j = add(dbp->db1d.get_3d_splay_junctions(), "junction bodies", "walls-splay-tubes", 4, 0.95f, 0.8f, 0.6f, 1.0f, TT_WSRC_SPLAYTUBES, NULL);
+    return t || j;
+  };
+  if ((this->wallsrc & TT_WSRC_CENTERLINE) != 0) lrud();
+  if ((this->wallsrc & TT_WSRC_MAPS) != 0) {
+    bool m = add(dbp->db1d.get_3d_map_tubes(), "walls from maps and sections", "walls-maps", 4, 0.8f, 0.85f, 0.95f, 1.0f, TT_WSRC_MAPS, NULL);
+    m = add(dbp->db1d.get_3d_map_junctions(), "junctions from maps", "walls-maps", 4, 0.95f, 0.75f, 0.55f, 1.0f, TT_WSRC_MAPS, NULL) || m;
+    m = add(dbp->db1d.get_3d_map_fills(), "passages from the drawn plan", "walls-maps", 4, 0.6f, 0.85f, 0.7f, 1.0f, TT_WSRC_MAPS, NULL) || m;
+    if (!m && ((this->wallsrc & TT_WSRC_SPLAYTUBES) == 0) && !splay_tubes() && ((this->wallsrc & TT_WSRC_CENTERLINE) == 0))
+      lrud();
+  }
+  if ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0) splay_tubes();
+  if ((this->wallsrc & TT_WSRC_SCANS) != 0) {
+    for (auto & o : dbp->object_list) {
+      if (o->get_class_id() != TT_SCAN_CMD) continue;
+      thscan * cscan = dynamic_cast<thscan*>(o.get());
+      if (cscan->fsptr->is_selected())
+        add(cscan->get_3d(), fmt::format("{}@{}", cscan->name, cscan->fsptr->full_name), "walls-scans", 4,
+            0.85f, 0.85f, 0.8f, 1.0f, TT_WSRC_SCANS, cscan->fsptr);
+    }
+  }
+  if ((this->wallsrc & TT_WSRC_SPLAYS) != 0) {
+    for (size_t ii = 0; ii < dbp->db1d.station_vec.size(); ii++) {
+      thdb1ds * pst = &(dbp->db1d.station_vec[ii]);
+      if ((pst->uid != ii + 1) || pst->is_temporary() || (!pst->survey->is_selected())) continue;
+      add(pst->get_3d_outline(), fmt::format("{}@{}", pst->name, pst->survey->full_name),
+          "walls-splays", 4, 0.6f, 0.8f, 0.6f, 0.5f, TT_WSRC_SPLAYS, pst->survey);
+    }
+  }
+  return res;
+}
+
 
 void thexpmodel::dump_header(FILE * xf)
 {
@@ -2405,25 +2472,8 @@ std::string thexpmodel::get_gltf_data(class thdatabase * dbp) {
   if ((this->items & TT_EXPMODEL_ITEM_SPLAYSHOTS) != 0)
     add(splay_pgn, "splays", "splays", 1, 0.6f, 0.6f, 0.6f, 1.0f);
 
-  if ((this->items & TT_EXPMODEL_ITEM_WALLS) != 0) {
-    if ((this->wallsrc & TT_WSRC_CENTERLINE) != 0)
-      add(dbp->db1d.get_3d_walls(), "LRUD walls", "walls-centreline", 4, 0.9f, 0.9f, 0.9f, 1.0f);
-    if ((this->wallsrc & TT_WSRC_SPLAYTUBES) != 0) {
-      add(dbp->db1d.get_3d_splay_tubes(), "splay tubes", "walls-splay-tubes", 4, 0.75f, 0.8f, 0.95f, 1.0f);
-      add(dbp->db1d.get_3d_section_splays(), "section splays", "section-splays", 1, 1.0f, 0.8f, 0.2f, 1.0f);
-      add(dbp->db1d.get_3d_section_polygons(), "section polygons", "section-polygons", 1, 1.0f, 0.35f, 0.25f, 1.0f);
-      add(dbp->db1d.get_3d_splay_junctions(), "junction bodies", "walls-junctions", 4, 0.95f, 0.8f, 0.6f, 1.0f);
-      add(dbp->db1d.get_3d_virtual_splays(), "virtual splays", "virtual-splays", 1, 0.2f, 1.0f, 0.4f, 1.0f);
-    }
-    if ((this->wallsrc & TT_WSRC_SPLAYS) != 0) {
-      for (size_t ii = 0; ii < dbp->db1d.station_vec.size(); ii++) {
-        thdb1ds * pst = &(dbp->db1d.station_vec[ii]);
-        if ((pst->uid != ii + 1) || (!pst->survey->is_selected())) continue;
-        add(pst->get_3d_outline(), fmt::format("{}@{}", pst->name, pst->survey->full_name),
-            "walls-splays", 4, 0.6f, 0.8f, 0.6f, 0.5f);
-      }
-    }
-  }
+  for (const thexpmodel_layer & l : this->get_wall_layers(dbp))
+    add(l.d3d, l.name, l.group, l.mode, l.rgba[0], l.rgba[1], l.rgba[2], l.rgba[3]);
 
   // binary buffer
   std::string bin, json;

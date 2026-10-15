@@ -33,6 +33,7 @@
 #include "thexport.h"
 #include "thsurvey.h"
 #include <string>
+#include <vector>
 
 
 /**
@@ -184,6 +185,30 @@ static const thstok thtt_expmodel_wallsrc[] = {
 
 
 /**
+ * Parse a wall source value: one source or several separated by commas
+ * (e.g. "maps,centreline"). Returns their TT_WSRC_* flags combined, or
+ * TT_WSRC_UNKNOWN if any of them is unknown.
+ */
+
+unsigned thexpmodel_parse_wallsrc(const char * value);
+
+
+/**
+ * One layer of model walls, as every model format exports it.
+ */
+
+struct thexpmodel_layer {
+  class thdb3ddata * d3d;  ///< The mesh.
+  std::string name,  ///< Layer name (e.g. a station or scan name).
+    group;  ///< Viewer group the layer is switched with.
+  int mode;  ///< Drawing mode: 4 triangles, 1 lines.
+  float rgba[4];  ///< Colour.
+  unsigned source;  ///< The TT_WSRC_* it comes from.
+  class thsurvey * survey;  ///< Survey it belongs to; NULL for the whole model.
+};
+
+
+/**
  * HTML viewer library source.
  */
 
@@ -244,6 +269,8 @@ class thexpmodel : public thexport {
   void export_html_file(class thdatabase * dbp);  ///< Export HTML page with 3D viewer.
 
   void export_kml_survey_file(FILE * out, thsurvey * surv);  ///< Helper function to export part of the survey tree
+
+  std::vector<thexpmodel_layer> get_wall_layers(class thdatabase * dbp);  ///< Wall layers for the chosen wall sources.
 
   public:
   

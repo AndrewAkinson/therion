@@ -744,20 +744,46 @@ piecewise linear 3d model from passage walls made of B\'ezier curves.
      \hfil\break
      selects which features to export, if the format supports it. Surface
      is currently exported in |therion| format only.
-  * |wall-source <maps/centerline/all/splays/splay-tubes>| = set source data for passage
-    wall modeling.
-    \NEW{6.4.1}|splay-tubes|\[Passage tubes built from cross-section splay
-    shots, in the |loch|, |vrml|, |3dmf|, |dxf|, |gltf| and |html| formats
-    (the last two also contain the section splays and polygons). At each station
+  * |wall-source <maps/centerline/splays/splay-tubes/scans/all>| = set source data for passage
+    wall modeling. \NEW{6.4.1}Several sources may be given separated by commas,
+    e.g. |maps,centerline|.
+
+    |maps| = \NEW{6.4.1}(default) passages built from the drawings and the
+    survey data\[At each station a cross section is taken from a drawn cross
+    section (a scrap with |-projection none| placed in the plan by a |section|
+    point), or else made from the splays near the plane bisecting the legs. It
+    is stretched sideways to the walls drawn in the plan and up and down to the
+    floor and roof drawn in the extended elevation, read as drawn, and joined
+    to its neighbours along the legs. Junctions take their shape from the drawn
+    plan; passages drawn in the plan without legs or splays get a tube of their
+    own. The log file lists how each station was handled.]. Without plan scraps
+    the |splay-tubes| model is used, and without cross-section splays either
+    the |centerline| walls.
+
+    |centerline| = walls from passage dimensions (LRUD).
+
+    |splays| = each station's splay shots wrapped into one shape.
+
+    |scans| = 3D scans included with the |scan| command.
+
+    \NEW{6.4.1}|splay-tubes| = passage tubes built from cross-section splay
+    shots only\[At each station
     with one leg in and one out (or a single leg at a passage end) the splays
     near the plane bisecting the legs form a section polygon; neighbouring
     sections are joined into tubes along the legs, matching the rightmost,
     highest, leftmost and lowest corners. Junctions get a body made of their
     splays. Where a station is drawn in a plan scrap and a drawn wall is more
     than 0.2\,m beyond the section on that side, a virtual horizontal splay
-    from the station to the wall is added. The log file lists how each
-    station was handled.] builds tubes
-    from cross-section splays; |all| includes it.
+    from the station to the wall is added.], ignoring the drawings.
+
+    |all| = all of the above together.
+
+    Walls are exported in the |loch|, |vrml|, |3dmf|, |dxf|, |gltf| and |html|
+    formats.
+  * \NEW{6.4.1}|section-spacing <change> <min> <max>| = for |maps| walls, place a
+    section along a leg wherever the drawn width or height has changed by more
+    than <change> per cent since the last one, at least <min> and at most <max>
+    metres apart. Default is |15 0.25 1|.
   * \NEW{6.4.1}|viewer-source <web/embedded>| = for the |html| format, set
     where the viewer library (three.js) comes from. With |web| (default)
     it is loaded from the internet when the page is opened, which keeps the

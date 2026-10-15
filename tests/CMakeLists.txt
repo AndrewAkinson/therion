@@ -13,6 +13,7 @@ add_executable(utest
     utest-thdb2dab.cxx
     utest-thdouble.cxx
     utest-thexception.cxx
+    utest-thexpmodel.cxx
     utest-thlayoutln.cxx
     utest-thlogfile.cxx
     utest-thobjectid.cxx
